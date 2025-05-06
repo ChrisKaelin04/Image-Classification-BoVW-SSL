@@ -2,9 +2,7 @@ import tensorflow_datasets as tfds
 import os
 import time
 
-# IMPORTANT: Specify a directory OUTSIDE your project folder for downloads/cache
-# This can become very large (100GB+ for Places365)
-# Choose a location with plenty of space, e.g., on your D: drive
+#Setup for downloading and preparing the Places365 dataset using TensorFlow Datasets (TFDS). This was not written by me, used online references.
 TFDS_DATA_DIR = "E:\CV_imgs"
 print(f"--- Starting Places365 Download and Preparation ---")
 print(f"Target directory for TFDS data: {TFDS_DATA_DIR}")
