@@ -44,39 +44,39 @@ print(f"Selected subset of {SUBSET_SIZE} images from the dataset; adding indices
 # Output of ds_subset_indexed will be (index, tf_example) tuples
 
 # Function to extract features
-def extract_features_tf_element(index, tf_example):
-    '''Extracts SIFT, ORB, and HOG features from an indexed tfds example.'''
+def extract_features_tf_element(index_tensor, img_tensor, label_tensor): # Takes tensors directly
+    '''Extracts SIFT, ORB, and HOG features from indexed tensors.'''
     try:
-        img_tensor = tf_example['image']
-        label_tensor = tf_example['label']
+        # Convert input tensors to numpy
         img_np = img_tensor.numpy()
         label = label_tensor.numpy()
-        idx = index.numpy()
-        
+        idx = index_tensor.numpy()
+
         gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        
+
         # Initialize Feature Extractors
         sift = cv2.SIFT_create()
         orb = cv2.ORB_create(nfeatures=1000)
         hog_win_size = (128, 128)
         hog = cv2.HOGDescriptor(_winSize=hog_win_size, _blockSize=(16,16), _blockStride=(8,8), _cellSize=(8,8), _nbins=9)
-        
-        # Begin Feature Extraction
+
+        # Begin Feature Extraction - keypoints not needed
         keypoints_sift, descriptors_sift = sift.detectAndCompute(gray, None)
         keypoints_orb, descriptors_orb = orb.detectAndCompute(gray, None)
         resized_for_hog = cv2.resize(gray, hog_win_size)
         descriptor_hog = hog.compute(resized_for_hog)
         descriptor_hog = descriptor_hog.flatten() if descriptor_hog is not None else None
-        
+
         # Handle None cases
         if descriptors_sift is None: descriptors_sift = np.array([], dtype=np.float32).reshape(0, 128)
         if descriptors_orb is None: descriptors_orb = np.array([], dtype=np.uint8).reshape(0, 32)
         if descriptor_hog is None: descriptor_hog = np.array([], dtype=np.float32)
-        
+
         return (idx, label, descriptors_sift, descriptors_orb, descriptor_hog)
     except Exception as e:
-        idx = index.numpy()
-        return (idx, -1, 
+        # Need index even on error
+        idx = index_tensor.numpy() # Try converting index even if others fail
+        return (idx, -1,
                 np.array([], dtype=np.float32).reshape(0, 128),
                 np.array([], dtype=np.uint8).reshape(0, 32),
                 np.array([], dtype=np.float32))
@@ -95,9 +95,9 @@ print(f"Beginning feature extraction with tf.data paralellism")
 # Indexed function mapping
 ds_processed = ds_subset_indexed.map(lambda i, x: tf.py_function(
                 func=extract_features_tf_element,
-                inp=[i, x], 
-                Tout=[tf.int64, tf.int64, tf.float32, tf.uint8, tf.float32]
-            ), 
+                inp=[i, x['image'], x['label']],  
+                Tout=[tf.int64, tf.int64, tf.float32, tf.uint8, tf.float32] 
+            ),
         num_parallel_calls=tf.data.AUTOTUNE)
 
 ds_processed = ds_processed.prefetch(buffer_size=tf.data.AUTOTUNE)
