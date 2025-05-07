@@ -154,4 +154,3 @@ else:
 
 print("\n--- Phase 2: BoVW Histogram Generation Complete ---")
 print(f"BoVW features saved in: {BOVW_FEATURES_DIR}")
-print("Next step: Phase 3 (HOG Feature Preparation) and Phase 4 (Classifier Training and Evaluation).")
