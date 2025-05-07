@@ -103,9 +103,7 @@ test_indices = split_data['test_indices']
 
 print(f"Loaded {len(train_indices)} training and {len(test_indices)} testing indices.")
 
-# Number of parallel jobs. -1 means use all available cores.
-# You can set this to a specific number e.g., 4
-N_JOBS = -1 # or os.cpu_count() or a specific number
+N_JOBS = os.cpu_count() - 4
 
 print("\n--- Processing SIFT Features ---")
 sift_kmeans_model_file = os.path.join(FEATURES_DIR, 'sift_kmeans_model_k1000_partial_fit.joblib')
