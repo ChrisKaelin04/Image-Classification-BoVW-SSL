@@ -1,6 +1,4 @@
 '''
-Code by Christopher Kaelin, 2025
-
 SOH stands for "SIFT, ORB, HOG" - these are the three feature extraction methods used in this script.
 All three methods are used to extract features from images in the Places365 dataset.
 Features will be saved in the specified output directory in a pickle file.
