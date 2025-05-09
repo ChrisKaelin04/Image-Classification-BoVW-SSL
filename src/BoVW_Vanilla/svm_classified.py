@@ -141,10 +141,10 @@ def train_and_evaluate_xgb(X_train_data, y_train_labels, X_test_data, y_test_lab
     # Parameters for XGBoost GridSearchCV - adjust as needed
     # This is a smaller grid for faster initial runs
     param_grid_xgb = {
-    'n_estimators': [200, 500],        
-    'learning_rate': [0.05, 0.1],     
-    'max_depth': [5, 8],              
-}
+        'n_estimators': [300],
+        'learning_rate': [0.05, 0.1],
+        'max_depth': [7], # Changed from 6 to 7 as it's a common depth
+    }
 
     print(f"Performing GridSearchCV for XGBoost on {feature_type_desc} (cv=3)...")
     # n_jobs for GridSearchCV with XGBoost on GPU:

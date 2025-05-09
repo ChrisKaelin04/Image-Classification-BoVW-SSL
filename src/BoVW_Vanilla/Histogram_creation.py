@@ -93,69 +93,69 @@ def process_indices_bovw_parallel(indices, descriptor_batches_dir, feature_type,
     
     return np.array(histograms_list)
 
-# --- Main Execution ---
-print("--- Starting BoVW Histogram Generation ---")
+def histogram_creation():
+    print("--- Starting BoVW Histogram Generation ---")
 
-print(f"Loading train/test split data from: {NPZ_FILE}")
-split_data = np.load(NPZ_FILE)
-train_indices = split_data['train_indices']
-test_indices = split_data['test_indices']
+    print(f"Loading train/test split data from: {NPZ_FILE}")
+    split_data = np.load(NPZ_FILE)
+    train_indices = split_data['train_indices']
+    test_indices = split_data['test_indices']
 
-print(f"Loaded {len(train_indices)} training and {len(test_indices)} testing indices.")
+    print(f"Loaded {len(train_indices)} training and {len(test_indices)} testing indices.")
 
-N_JOBS = os.cpu_count() - 4
+    N_JOBS = os.cpu_count() - 4
 
-print("\n--- Processing SIFT Features ---")
-sift_kmeans_model_file = os.path.join(FEATURES_DIR, 'sift_kmeans_model_k1000_partial_fit.joblib')
-sift_batches_subdir = 'sift_batches'
+    print("\n--- Processing SIFT Features ---")
+    sift_kmeans_model_file = os.path.join(FEATURES_DIR, 'sift_kmeans_model_k1000_partial_fit.joblib')
+    sift_batches_subdir = 'sift_batches'
 
-if os.path.exists(sift_kmeans_model_file):
-    print(f"Loading SIFT KMeans model from: {sift_kmeans_model_file}")
-    sift_kmeans = joblib.load(sift_kmeans_model_file)
+    if os.path.exists(sift_kmeans_model_file):
+        print(f"Loading SIFT KMeans model from: {sift_kmeans_model_file}")
+        sift_kmeans = joblib.load(sift_kmeans_model_file)
 
-    X_train_sift_bovw = process_indices_bovw_parallel(
-        train_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Train BoVW", n_jobs=N_JOBS
-    )
-    print(f"SIFT Training BoVW histograms shape: {X_train_sift_bovw.shape}")
-    if X_train_sift_bovw.size > 0:
-        np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_sift_bovw.npy'), X_train_sift_bovw)
-        print(f"Saved SIFT training BoVW features to {BOVW_FEATURES_DIR}")
+        X_train_sift_bovw = process_indices_bovw_parallel(
+            train_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Train BoVW", n_jobs=N_JOBS
+        )
+        print(f"SIFT Training BoVW histograms shape: {X_train_sift_bovw.shape}")
+        if X_train_sift_bovw.size > 0:
+            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_sift_bovw.npy'), X_train_sift_bovw)
+            print(f"Saved SIFT training BoVW features to {BOVW_FEATURES_DIR}")
 
-    X_test_sift_bovw = process_indices_bovw_parallel(
-        test_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Test BoVW", n_jobs=N_JOBS
-    )
-    print(f"SIFT Test BoVW histograms shape: {X_test_sift_bovw.shape}")
-    if X_test_sift_bovw.size > 0:
-        np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_sift_bovw.npy'), X_test_sift_bovw)
-        print(f"Saved SIFT test BoVW features to {BOVW_FEATURES_DIR}")
-else:
-    print(f"SIFT KMeans model not found at {sift_kmeans_model_file}. Skipping SIFT BoVW generation.")
+        X_test_sift_bovw = process_indices_bovw_parallel(
+            test_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Test BoVW", n_jobs=N_JOBS
+        )
+        print(f"SIFT Test BoVW histograms shape: {X_test_sift_bovw.shape}")
+        if X_test_sift_bovw.size > 0:
+            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_sift_bovw.npy'), X_test_sift_bovw)
+            print(f"Saved SIFT test BoVW features to {BOVW_FEATURES_DIR}")
+    else:
+        print(f"SIFT KMeans model not found at {sift_kmeans_model_file}. Skipping SIFT BoVW generation.")
 
-print("\n--- Processing ORB Features ---")
-orb_kmeans_model_file = os.path.join(FEATURES_DIR, 'orb_kmeans_model_k1000_partial_fit.joblib')
-orb_batches_subdir = 'orb_batches'
+    print("\n--- Processing ORB Features ---")
+    orb_kmeans_model_file = os.path.join(FEATURES_DIR, 'orb_kmeans_model_k1000_partial_fit.joblib')
+    orb_batches_subdir = 'orb_batches'
 
-if os.path.exists(orb_kmeans_model_file):
-    print(f"Loading ORB KMeans model from: {orb_kmeans_model_file}")
-    orb_kmeans = joblib.load(orb_kmeans_model_file)
+    if os.path.exists(orb_kmeans_model_file):
+        print(f"Loading ORB KMeans model from: {orb_kmeans_model_file}")
+        orb_kmeans = joblib.load(orb_kmeans_model_file)
 
-    X_train_orb_bovw = process_indices_bovw_parallel(
-        train_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Train BoVW", n_jobs=N_JOBS
-    )
-    print(f"ORB Training BoVW histograms shape: {X_train_orb_bovw.shape}")
-    if X_train_orb_bovw.size > 0:
-        np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_orb_bovw.npy'), X_train_orb_bovw)
-        print(f"Saved ORB training BoVW features to {BOVW_FEATURES_DIR}")
+        X_train_orb_bovw = process_indices_bovw_parallel(
+            train_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Train BoVW", n_jobs=N_JOBS
+        )
+        print(f"ORB Training BoVW histograms shape: {X_train_orb_bovw.shape}")
+        if X_train_orb_bovw.size > 0:
+            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_orb_bovw.npy'), X_train_orb_bovw)
+            print(f"Saved ORB training BoVW features to {BOVW_FEATURES_DIR}")
 
-    X_test_orb_bovw = process_indices_bovw_parallel(
-        test_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Test BoVW", n_jobs=N_JOBS
-    )
-    print(f"ORB Test BoVW histograms shape: {X_test_orb_bovw.shape}")
-    if X_test_orb_bovw.size > 0:
-        np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_orb_bovw.npy'), X_test_orb_bovw)
-        print(f"Saved ORB test BoVW features to {BOVW_FEATURES_DIR}")
-else:
-    print(f"ORB KMeans model not found at {orb_kmeans_model_file}. Skipping ORB BoVW generation.")
+        X_test_orb_bovw = process_indices_bovw_parallel(
+            test_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Test BoVW", n_jobs=N_JOBS
+        )
+        print(f"ORB Test BoVW histograms shape: {X_test_orb_bovw.shape}")
+        if X_test_orb_bovw.size > 0:
+            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_orb_bovw.npy'), X_test_orb_bovw)
+            print(f"Saved ORB test BoVW features to {BOVW_FEATURES_DIR}")
+    else:
+        print(f"ORB KMeans model not found at {orb_kmeans_model_file}. Skipping ORB BoVW generation.")
 
-print("\n--- Phase 2: BoVW Histogram Generation Complete ---")
-print(f"BoVW features saved in: {BOVW_FEATURES_DIR}")
+    print("\n--- Phase 2: BoVW Histogram Generation Complete ---")
+    print(f"BoVW features saved in: {BOVW_FEATURES_DIR}")
