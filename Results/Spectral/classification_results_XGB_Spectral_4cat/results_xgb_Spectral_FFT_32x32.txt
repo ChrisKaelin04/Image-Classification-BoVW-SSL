@@ -1,0 +1,23 @@
+--- XGBoost Results for Spectral_FFT_32x32 ---
+Params: {'learning_rate': 0.05, 'max_depth': 6, 'n_estimators': 300}
+CV Score: 0.4505
+Accuracy: 0.4725
+
+Report:
+                          precision    recall  f1-score   support
+
+Indoor Public/Commercial       0.43      0.56      0.49       167
+      Indoor Residential       0.47      0.42      0.44       165
+         Outdoor Natural       0.56      0.53      0.54       160
+           Outdoor Urban       0.46      0.38      0.42       162
+
+                accuracy                           0.47       654
+               macro avg       0.48      0.47      0.47       654
+            weighted avg       0.48      0.47      0.47       654
+
+
+CM:
+[[94 40  9 24]
+ [58 69 21 17]
+ [25 18 84 33]
+ [42 21 37 62]]
