@@ -12,20 +12,21 @@ Side Note: Computer Vision is a rat bastard of a field what the hell is going on
 def main():
     """
     Main function to orchestrate the workflow.
+    Uncomment the steps you want to run.
     """
     print("Starting the Image Classification Pipeline...")
 
     # Step 1: Get the data
-    download_dataset()
+    #download_dataset()
 
     # Step 2: Extract features
-    SOH_extract_SPM()
+    #SOH_extract_SPM()
     
     # Step 3: Build Vocabulary with KMeans
-    build_all_spm_vocabularies()
+    #build_all_spm_vocabularies()
     
     # Step 4: Split data into the 4 categories
-    split_data()
+    #split_data()
     
     # Step 5: Build Histograms for each image
     histogram_creation_SPM()

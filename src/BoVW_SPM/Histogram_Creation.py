@@ -132,18 +132,17 @@ def _generate_single_spm_for_parallel(image_idx, processed_indices_map, kmeans_m
 
 def process_indices_spm_parallel(indices, spm_batches_dir, feature_type, kmeans_model, vocab_size, num_pyramid_levels, desc="Processing Images for SPM", n_jobs=-1):
     processed_indices_map = {}
-    # Batch files for SPM are named like 'sift_spm_batch_0.pkl'
     batch_files = sorted(glob.glob(os.path.join(spm_batches_dir, f'{feature_type}_spm_batch_*.pkl')))
     
     if not batch_files:
         print(f"Error: No SPM batch files found for {feature_type} in {spm_batches_dir}")
-        return np.array([]) # Return empty array if no batch files
+        return np.array([])
     
     print(f"Mapping indices from {len(batch_files)} SPM batch files for {feature_type}...")
     for batch_file_path in tqdm(batch_files, desc=f"Scanning {feature_type} SPM batches for mapping"):
         try:
             with open(batch_file_path, 'rb') as f:
-                batch_data = pickle.load(f) # batch_data is {idx: {'descriptors': ..., 'coordinates': ...}}
+                batch_data = pickle.load(f)
             for idx_in_batch in batch_data.keys():
                 processed_indices_map[idx_in_batch] = batch_file_path
         except Exception as e:
@@ -151,11 +150,20 @@ def process_indices_spm_parallel(indices, spm_batches_dir, feature_type, kmeans_
             continue
     print(f"Mapped {len(processed_indices_map)} unique descriptor sets for {feature_type} (SPM).")
 
-    if not processed_indices_map and indices: # Only print warning if we expect indices but map is empty
-        print(f"Warning: No descriptors mapped for {feature_type} (SPM), but indices were provided. Histograms will be zeros.")
-    elif not indices: # No indices to process
+    # --- MODIFIED CHECKS HERE ---
+    # Check if indices array has any elements (i.e., is not empty)
+    if not processed_indices_map and indices.size > 0: 
+        print(f"Warning: No descriptors mapped for {feature_type} (SPM), but indices were provided (count: {indices.size}). Histograms might be zeros for many.")
+    # Check if indices array is empty
+    elif indices.size == 0: 
         print(f"No indices provided for {feature_type} (SPM). Returning empty array.")
         return np.array([])
+    # --- END OF MODIFIED CHECKS ---
+
+    # Additional check: if processed_indices_map is empty but we have indices, 
+    # all histograms will be zero, which is fine, but good to be aware.
+    if not processed_indices_map and indices.size > 0:
+        print(f"Note: processed_indices_map is empty for {feature_type}, all SPM histograms will be zero vectors.")
 
 
     print(f"\nGenerating SPM histograms for {len(indices)} images ({feature_type}) using {n_jobs if n_jobs != -1 else os.cpu_count()} workers...")
@@ -166,14 +174,8 @@ def process_indices_spm_parallel(indices, spm_batches_dir, feature_type, kmeans_
         ) for image_idx in tqdm(indices, desc=desc)
     )
     
-    # Check if histograms_list is empty or contains only None/empty arrays before converting
     if not histograms_list:
         return np.array([])
-    
-    # Filter out potential None returns if any worker failed catastrophically, though unlikely with current error handling
-    # histograms_list = [h for h in histograms_list if h is not None]
-    # if not histograms_list:
-    #    return np.array([])
         
     return np.array(histograms_list)
 
