@@ -1,0 +1,24 @@
+--- XGBoost Results for SIFT_ORB_HOG_Global ---
+Scaling: False
+Params: {'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 300}
+CV Score: 0.6767
+Accuracy: 0.6829
+
+Report:
+                          precision    recall  f1-score   support
+
+Indoor Public/Commercial       0.68      0.78      0.72      7135
+      Indoor Residential       0.52      0.09      0.15      1440
+         Outdoor Natural       0.66      0.43      0.52      2660
+           Outdoor Urban       0.70      0.78      0.73      8765
+
+                accuracy                           0.68     20000
+               macro avg       0.64      0.52      0.53     20000
+            weighted avg       0.67      0.68      0.66     20000
+
+
+CM:
+[[5553  106   66 1410]
+ [1092  129    6  213]
+ [ 141    0 1147 1372]
+ [1413   12  510 6830]]

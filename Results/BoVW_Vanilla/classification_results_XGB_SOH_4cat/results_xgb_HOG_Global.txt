@@ -1,0 +1,24 @@
+--- XGBoost Results for HOG_Global ---
+Scaling: False
+Params: {'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 300}
+CV Score: 0.6411
+Accuracy: 0.6479
+
+Report:
+                          precision    recall  f1-score   support
+
+Indoor Public/Commercial       0.65      0.76      0.70      7135
+      Indoor Residential       0.51      0.06      0.11      1440
+         Outdoor Natural       0.62      0.21      0.32      2660
+           Outdoor Urban       0.65      0.78      0.71      8765
+
+                accuracy                           0.65     20000
+               macro avg       0.61      0.46      0.46     20000
+            weighted avg       0.64      0.65      0.61     20000
+
+
+CM:
+[[5457   83   43 1552]
+ [1130   93    2  215]
+ [ 218    0  570 1872]
+ [1615    5  308 6837]]
