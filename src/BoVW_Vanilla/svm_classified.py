@@ -4,7 +4,6 @@ import pickle
 import warnings
 import joblib
 import h5py # For loading HOG data
-from sklearn.svm import SVC # Still keeping SVM for comparison or if you want to run both
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler # SVMs often benefit more from scaling than tree models
@@ -244,48 +243,50 @@ def load_and_align_global_hog(hog_h5_filepath, target_indices_for_set):
     print(f"  Aligned global HOG shape: {aligned_hog_array.shape}")
     return aligned_hog_array
 
-# --- 4. Load Feature Sets ---
-print("\n--- Loading Feature Sets ---")
-X_train_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "train")
-X_test_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "test")
-X_train_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "train")
-X_test_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "test")
-X_train_hog_global = load_and_align_global_hog(HOG_DATA_FILE, train_indices)
-X_test_hog_global = load_and_align_global_hog(HOG_DATA_FILE, test_indices)
 
 # --- 5. Train and Evaluate Classifiers ---
 # SVMs take too long. Will use XGBoost for GPU usage. You can battle building the thundersvm if you want but fuck that I gave up
 # Set to True to run XGBoost, False to skip XGBoost
 RUN_XGBOOST_CLASSIFIERS = True
 
-if RUN_XGBOOST_CLASSIFIERS:
-    print("\n--- Training and Evaluating XGBoost Classifiers ---")
-    # XGBoost Individual Features (Scaling typically not needed, or can be set to False in function call)
-    if X_train_sift_bovw is not None and X_test_sift_bovw is not None:
-        train_and_evaluate_xgb(X_train_sift_bovw, y_train, X_test_sift_bovw, y_test,
-                               f"SIFT_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-    if X_train_orb_bovw is not None and X_test_orb_bovw is not None:
-        train_and_evaluate_xgb(X_train_orb_bovw, y_train, X_test_orb_bovw, y_test,
-                               f"ORB_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-    if X_train_hog_global is not None and X_test_hog_global is not None:
-        train_and_evaluate_xgb(X_train_hog_global, y_train, X_test_hog_global, y_test,
-                               "HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-    # XGBoost Combined Features
-    if X_train_sift_bovw is not None and X_train_hog_global is not None:
-        if X_train_sift_bovw.shape[0] == X_train_hog_global.shape[0]:
-            X_train_sift_hog = np.concatenate((X_train_sift_bovw, X_train_hog_global), axis=1)
-            X_test_sift_hog = np.concatenate((X_test_sift_bovw, X_test_hog_global), axis=1)
-            train_and_evaluate_xgb(X_train_sift_hog, y_train, X_test_sift_hog, y_test, f"SIFT_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-    if X_train_orb_bovw is not None and X_train_hog_global is not None:
-        if X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
-            X_train_orb_hog = np.concatenate((X_train_orb_bovw, X_train_hog_global), axis=1)
-            X_test_orb_hog = np.concatenate((X_test_orb_bovw, X_test_hog_global), axis=1)
-            train_and_evaluate_xgb(X_train_orb_hog, y_train, X_test_orb_hog, y_test, f"ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-    if X_train_sift_bovw is not None and X_train_orb_bovw is not None and X_train_hog_global is not None:
-         if X_train_sift_bovw.shape[0] == X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
-            X_train_all_xgb = np.concatenate((X_train_sift_bovw, X_train_orb_bovw, X_train_hog_global), axis=1)
-            X_test_all_xgb = np.concatenate((X_test_sift_bovw, X_test_orb_bovw, X_test_hog_global), axis=1)
-            train_and_evaluate_xgb(X_train_all_xgb, y_train, X_test_all_xgb, y_test, f"SIFT_ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+def test():
+    # --- 4. Load Feature Sets ---
+    print("\n--- Loading Feature Sets ---")
+    X_train_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "train")
+    X_test_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "test")
+    X_train_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "train")
+    X_test_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "test")
+    X_train_hog_global = load_and_align_global_hog(HOG_DATA_FILE, train_indices)
+    X_test_hog_global = load_and_align_global_hog(HOG_DATA_FILE, test_indices)
+
+    if RUN_XGBOOST_CLASSIFIERS:
+        print("\n--- Training and Evaluating XGBoost Classifiers ---")
+        # XGBoost Individual Features (Scaling typically not needed, or can be set to False in function call)
+        if X_train_sift_bovw is not None and X_test_sift_bovw is not None:
+            train_and_evaluate_xgb(X_train_sift_bovw, y_train, X_test_sift_bovw, y_test,
+                                f"SIFT_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        if X_train_orb_bovw is not None and X_test_orb_bovw is not None:
+            train_and_evaluate_xgb(X_train_orb_bovw, y_train, X_test_orb_bovw, y_test,
+                                f"ORB_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        if X_train_hog_global is not None and X_test_hog_global is not None:
+            train_and_evaluate_xgb(X_train_hog_global, y_train, X_test_hog_global, y_test,
+                                "HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        # XGBoost Combined Features
+        if X_train_sift_bovw is not None and X_train_hog_global is not None:
+            if X_train_sift_bovw.shape[0] == X_train_hog_global.shape[0]:
+                X_train_sift_hog = np.concatenate((X_train_sift_bovw, X_train_hog_global), axis=1)
+                X_test_sift_hog = np.concatenate((X_test_sift_bovw, X_test_hog_global), axis=1)
+                train_and_evaluate_xgb(X_train_sift_hog, y_train, X_test_sift_hog, y_test, f"SIFT_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        if X_train_orb_bovw is not None and X_train_hog_global is not None:
+            if X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
+                X_train_orb_hog = np.concatenate((X_train_orb_bovw, X_train_hog_global), axis=1)
+                X_test_orb_hog = np.concatenate((X_test_orb_bovw, X_test_hog_global), axis=1)
+                train_and_evaluate_xgb(X_train_orb_hog, y_train, X_test_orb_hog, y_test, f"ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        if X_train_sift_bovw is not None and X_train_orb_bovw is not None and X_train_hog_global is not None:
+            if X_train_sift_bovw.shape[0] == X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
+                X_train_all_xgb = np.concatenate((X_train_sift_bovw, X_train_orb_bovw, X_train_hog_global), axis=1)
+                X_test_all_xgb = np.concatenate((X_test_sift_bovw, X_test_orb_bovw, X_test_hog_global), axis=1)
+                train_and_evaluate_xgb(X_train_all_xgb, y_train, X_test_all_xgb, y_test, f"SIFT_ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
 
 
-print("\n--- Classification Pipeline Complete ---")
+    print("\n--- Classification Pipeline Complete ---")

@@ -4,6 +4,7 @@ from SOH_extract import SOH_extract
 from Vocabulary import build_vocab_KMeans
 from Label_Split import split_data
 from Histogram_creation import histogram_creation
+from svm_classified import test
 
 '''
 Note: This script is written with GPU usage in mind! If you are using a CPU switch to a different usage for XGBoost or use SVMs.
@@ -31,6 +32,7 @@ def main():
     histogram_creation()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
+    test()
 
     print("Pipeline completed successfully!")
 
