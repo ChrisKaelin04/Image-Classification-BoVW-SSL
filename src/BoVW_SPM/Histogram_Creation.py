@@ -32,13 +32,18 @@ def generate_spm_histogram_for_image(image_data_dict, kmeans_model, vocab_size, 
     vocab_size: size of the vocabulary
     num_pyramid_levels: number of pyramid levels (e.g., 3 for L=0,1,2)
     """
+
+    total_regions_in_pyramid = sum([(2**l)**2 for l in range(num_pyramid_levels)])
+    empty_hist_shape = total_regions_in_pyramid * vocab_size
+    
+    if image_data_dict is None:
+        # print(f"Warning: image_data_dict is None in generate_spm_histogram_for_image. Returning zeros.")
+        return np.zeros(empty_hist_shape, dtype=np.float32)
+    
     descriptors = image_data_dict.get('descriptors')
     coordinates = image_data_dict.get('coordinates')  # Nx2 array of (x,y)
     img_width = image_data_dict.get('width')
     img_height = image_data_dict.get('height')
-
-    total_regions_in_pyramid = sum([(2**l)**2 for l in range(num_pyramid_levels)])
-    empty_hist_shape = total_regions_in_pyramid * vocab_size
 
     if descriptors is None or descriptors.shape[0] == 0 or \
        coordinates is None or coordinates.shape[0] != descriptors.shape[0] or \
@@ -189,7 +194,7 @@ def histogram_creation_SPM():
     test_indices = split_data['test_indices']
     print(f"Loaded {len(train_indices)} training and {len(test_indices)} testing indices.")
 
-    N_JOBS = os.cpu_count() - 2 if os.cpu_count() > 2 else 1 # Adjusted N_JOBS
+    N_JOBS = os.cpu_count() - 4 if os.cpu_count() > 4 else 1 # Adjusted N_JOBS
 
     # --- SIFT SPM Features ---
     print("\n--- Processing SIFT Features for SPM ---")

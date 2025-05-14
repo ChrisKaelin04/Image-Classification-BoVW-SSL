@@ -29,7 +29,7 @@ def main():
     #split_data()
     
     # Step 5: Build Histograms for each image
-    histogram_creation_SPM()
+    #histogram_creation_SPM()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
     run_spm_classification_pipeline()
