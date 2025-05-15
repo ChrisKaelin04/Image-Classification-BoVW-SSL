@@ -1,216 +1,355 @@
-import tensorflow as tf
-import tensorflow_datasets as tfds
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as transforms
 import numpy as np
 import os
-import pickle # For potentially saving lists if not using h5py immediately
+# import pandas as pd
+# import glob
 from tqdm import tqdm
+import h5py
+from PIL import Image
+
+import tensorflow as tf
+import tensorflow_datasets as tfds
+import gc
 
 # --- Configuration ---
-# Common paths (for loading splits)
-FEATURES_DIR_VANILLA = "E:\CV_features" # Where your original splits are
-SPLITS_DIR_COMMON = os.path.join(FEATURES_DIR_VANILLA, "train_test_splits_4cat_revised")
-NPZ_FILE = os.path.join(SPLITS_DIR_COMMON, "train_test_split_data_4cat_revised.npz")
-
-# CNN Feature Output Paths
-CNN_FEATURES_BASE_DIR = "E:\CV_Features_CNN"
-CNN_MODEL_NAME = "ResNet50V2" # Or "MobileNetV2", "EfficientNetB0" etc.
+CNN_FEATURES_BASE_DIR = r"E:\CV_Features_CNN_PyTorch"
+CNN_MODEL_NAME = "AlexNet_Places365_PyTorch"
 CNN_EXTRACTED_FEATURES_DIR = os.path.join(CNN_FEATURES_BASE_DIR, "cnn_extracted_features", CNN_MODEL_NAME)
+NPZ_FILE_SUBSET_SPLIT = os.path.join(r"E:\CV_features", "train_test_splits_4cat_revised", "train_test_split_data_4cat_revised.npz")
+TFDS_DATA_DIR = r"E:\CV_imgs"
+TFDS_SUBSET_SIZE = 100000
+TFDS_RANDOM_SEED = 42
 
-os.makedirs(CNN_EXTRACTED_FEATURES_DIR, exist_ok=True)
+IMG_WIDTH, IMG_HEIGHT = 224, 224
+BATCH_SIZE_PYTORCH_CNN = 32
+PLACES365_WEIGHTS_PATH = r"E:\CV_Features_CNN_PyTorch\alexnet_places365.pth.tar"
 
-# TFDS Configuration
-TFDS_DATA_DIR = "E:\CV_imgs"
-
-# CNN Model Specifics (for ResNet50V2)
-IMG_WIDTH, IMG_HEIGHT = 224, 224 # Input size for ResNet50V2
-# Preprocessing function for the chosen model
-PREPROCESS_INPUT_FUNC = tf.keras.applications.resnet_v2.preprocess_input
-
-# --- Helper function to build the feature extraction model ---
-def get_feature_extractor_model(model_name="ResNet50V2"):
-    if model_name == "ResNet50V2":
-        base_model = tf.keras.applications.ResNet50V2(
-            input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
-            include_top=False,  # Exclude the ImageNet classifier
-            weights='imagenet',
-            pooling='avg'       # Adds a GlobalAveragePooling2D layer
-        )
-    elif model_name == "MobileNetV2":
-        # IMG_WIDTH, IMG_HEIGHT would be 224, 224 for MobileNetV2 too
-        # PREPROCESS_INPUT_FUNC would be tf.keras.applications.mobilenet_v2.preprocess_input
-        base_model = tf.keras.applications.MobileNetV2(
-            input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
-            include_top=False, weights='imagenet', pooling='avg'
-        )
-    # Add other models like EfficientNet here if needed
-    else:
-        raise ValueError(f"Unsupported model_name: {model_name}")
-
-    # The base_model with pooling='avg' is already our feature extractor
-    # No need to create a new tf.keras.Model if pooling='avg' is used
-    # If pooling=None, you'd do:
-    # inputs = tf.keras.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
-    # x = base_model(inputs, training=False)
-    # outputs = tf.keras.layers.GlobalAveragePooling2D()(x)
-    # feature_extractor = tf.keras.Model(inputs, outputs)
-    # return feature_extractor
-    
-    base_model.trainable = False # Freeze the weights
-    return base_model
-
-# --- Function to process a batch of images ---
-@tf.function # For potential graph mode optimization
-def extract_features_batch(images, model):
-    images_resized = tf.image.resize(images, [IMG_HEIGHT, IMG_WIDTH])
-    images_preprocessed = PREPROCESS_INPUT_FUNC(images_resized)
-    features = model(images_preprocessed, training=False) # training=False is important
-    return features
-
-def run_cnn_feature_extraction():
-    print(f"--- Starting CNN Feature Extraction using {CNN_MODEL_NAME} ---")
-
-    # 1. Load train/test indices from your common NPZ file
-    print(f"Loading train/test indices from: {NPZ_FILE}")
-    split_data = np.load(NPZ_FILE)
-    train_indices_original = split_data['train_indices']
-    test_indices_original = split_data['test_indices']
-    print(f"Loaded {len(train_indices_original)} train and {len(test_indices_original)} test original indices.")
-
-    # Convert to sets for faster lookup
-    train_indices_set = set(train_indices_original)
-    test_indices_set = set(test_indices_original)
-
-    # 2. Load TFDS dataset
-    # We need to iterate through it to find our specific images by index
-    print(f"Loading Places365 dataset from: {TFDS_DATA_DIR}...")
-    # We load the 'train' split because your indices likely come from an enumeration of this split
-    ds_full_train = tfds.load(
-        'places365_small',
-        split='train', # Assuming your indices are from the 'train' split
-        data_dir=TFDS_DATA_DIR,
-        shuffle_files=False # IMPORTANT: Keep order for index matching
-    ).enumerate() # Enumerate to get (index, data_element)
-
-    # 3. Load the pretrained CNN feature extractor model
-    print(f"Loading pretrained {CNN_MODEL_NAME} model...")
-    feature_extractor = get_feature_extractor_model(model_name=CNN_MODEL_NAME)
-    feature_extractor.summary() # Print model summary
-
-    # 4. Prepare lists to store features and map original indices to new sequential indices
-    # We need to re-map because np.save will save sequentially
-    
-    X_train_features_list = []
-    y_train_labels_list = [] # We also need to save corresponding labels if we build a new NPZ
-    train_original_idx_map = {} # Maps original TFDS index to new sequential index in our saved array
-
-    X_test_features_list = []
-    y_test_labels_list = []
-    test_original_idx_map = {}
-
-    # We can process in batches for GPU efficiency
-    BATCH_SIZE_CNN = 32 # Adjust based on GPU memory
-    
-    # Temporary lists for current batch
-    current_batch_images = []
-    current_batch_indices_labels = [] # Store (original_idx, original_label, 'train'/'test')
-
-    print("Iterating through dataset to find and process selected train/test images...")
-    # Iterate through the *entire* TFDS train split to find our selected indices
-    # This can be slow if SUBSET_SIZE is much smaller than the full dataset.
-    # A more efficient way if SUBSET_SIZE was from a .take() on a shuffled dataset is harder to map back.
-    # Assuming your original SUBSET_SIZE was a .take() on the ordered 'train' split for this to work easily.
-    
-    # Create dictionaries to hold data for each split to ensure order later
-    # Key: original_tfds_index, Value: {'image': img_tensor, 'label': label_tensor}
-    train_data_to_process = {}
-    test_data_to_process = {}
-
-    print("Scanning dataset to collect images for selected train/test indices...")
-    for original_idx, data_element in tqdm(ds_full_train, desc="Scanning TFDS"):
-        original_idx = original_idx.numpy() # Convert EagerTensor to numpy
-        if original_idx in train_indices_set:
-            train_data_to_process[original_idx] = {'image': data_element['image'], 'label': data_element['label']}
-        elif original_idx in test_indices_set:
-            test_data_to_process[original_idx] = {'image': data_element['image'], 'label': data_element['label']}
-
-    # Process Training Images (in the order of train_indices_original)
-    print(f"\nExtracting features for {len(train_indices_original)} training images...")
-    img_buffer = []
-    for i, original_idx in enumerate(tqdm(train_indices_original, desc="Train Features")):
-        if original_idx in train_data_to_process:
-            data = train_data_to_process[original_idx]
-            img_buffer.append(data['image'])
-            y_train_labels_list.append(data['label'].numpy()) # Save original label
-
-            if len(img_buffer) == BATCH_SIZE_CNN or i == len(train_indices_original) - 1:
-                if img_buffer: # Ensure buffer is not empty
-                    img_batch_tf = tf.stack(img_buffer)
-                    features_batch = extract_features_batch(img_batch_tf, feature_extractor)
-                    X_train_features_list.extend(features_batch.numpy())
-                    img_buffer = [] # Clear buffer
-        else:
-            print(f"Warning: Original index {original_idx} from train_indices not found in scanned TFDS data.")
-            # Add a placeholder or handle error - for now, this might lead to misaligned features/labels
-            # It's better if all train_indices_original are found.
-
-    # Process Test Images (in the order of test_indices_original)
-    print(f"\nExtracting features for {len(test_indices_original)} test images...")
-    img_buffer = []
-    for i, original_idx in enumerate(tqdm(test_indices_original, desc="Test Features")):
-        if original_idx in test_data_to_process:
-            data = test_data_to_process[original_idx]
-            img_buffer.append(data['image'])
-            y_test_labels_list.append(data['label'].numpy()) # Save original label
-
-            if len(img_buffer) == BATCH_SIZE_CNN or i == len(test_indices_original) - 1:
-                if img_buffer:
-                    img_batch_tf = tf.stack(img_buffer)
-                    features_batch = extract_features_batch(img_batch_tf, feature_extractor)
-                    X_test_features_list.extend(features_batch.numpy())
-                    img_buffer = []
-        else:
-            print(f"Warning: Original index {original_idx} from test_indices not found in scanned TFDS data.")
+# Move device definition outside functions so it's accessible globally
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 
-    # 5. Save features
-    if X_train_features_list:
-        X_train_cnn_features = np.array(X_train_features_list)
-        train_output_file = os.path.join(CNN_EXTRACTED_FEATURES_DIR, f'X_train_{CNN_MODEL_NAME.lower()}_features.npy')
-        np.save(train_output_file, X_train_cnn_features)
-        print(f"\nSaved training CNN features to: {train_output_file}, Shape: {X_train_cnn_features.shape}")
-        
-        # Optionally save the corresponding original labels if you want to make a new NPZ specific to these features
-        # For now, we assume you'll use the original y_train from your common NPZ, aligned by order.
-        if len(y_train_labels_list) != X_train_cnn_features.shape[0]:
-            print(f"WARNING: Mismatch in number of extracted train features ({X_train_cnn_features.shape[0]}) and collected labels ({len(y_train_labels_list)})")
-
-    if X_test_features_list:
-        X_test_cnn_features = np.array(X_test_features_list)
-        test_output_file = os.path.join(CNN_EXTRACTED_FEATURES_DIR, f'X_test_{CNN_MODEL_NAME.lower()}_features.npy')
-        np.save(test_output_file, X_test_cnn_features)
-        print(f"Saved test CNN features to: {test_output_file}, Shape: {X_test_cnn_features.shape}")
-        if len(y_test_labels_list) != X_test_cnn_features.shape[0]:
-            print(f"WARNING: Mismatch in number of extracted test features ({X_test_cnn_features.shape[0]}) and collected labels ({len(y_test_labels_list)})")
-
-
-    print(f"--- CNN Feature Extraction using {CNN_MODEL_NAME} Complete ---")
-    
-def extract_cnn_features():
-    """
-    Main function to run the CNN feature extraction pipeline.
-    """
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
+# --- Custom PyTorch Dataset (Keep this outside the pipeline function) ---
+class TFDSSubsetFeatureDataset(torch.utils.data.Dataset):
+    def __init__(self, subset_indices_list, image_numpy_list, broad_labels_list, transform=None):
+        self.subset_indices = subset_indices_list
+        self.images_numpy = image_numpy_list
+        self.labels = broad_labels_list
+        self.transform = transform
+        if not (len(self.subset_indices) == len(self.images_numpy) == len(self.labels)):
+            raise ValueError("Indices, images, and labels lists must have the same length.")
+    def __len__(self):
+        return len(self.subset_indices)
+    def __getitem__(self, list_idx):
+        subset_idx_val = self.subset_indices[list_idx]
+        img_np = self.images_numpy[list_idx]
+        label_val = self.labels[list_idx]
         try:
-            # Currently, memory growth needs to be the same across GPUs
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logical_gpus = tf.config.experimental.list_logical_devices('GPU')
-            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-        except RuntimeError as e:
-            # Memory growth must be set before GPUs have been initialized
-            print(e)
-    else:
-        print("No GPU found by TensorFlow. Running on CPU.")
+            image = Image.fromarray(img_np).convert('RGB')
+        except Exception as e:
+             print(f"\nERROR: Convert NumPy to PIL for subset_idx {subset_idx_val} (list_idx {list_idx}): {e}. Returning dummy image/data.")
+             dummy_img = torch.zeros(3, IMG_HEIGHT, IMG_WIDTH, dtype=torch.float32)
+             return subset_idx_val, dummy_img, label_val
+        if self.transform:
+            try:
+                image = self.transform(image)
+            except Exception as e:
+                 print(f"\nWARN: Transform error for subset_idx {subset_idx_val} (list_idx {list_idx}): {e}. Returning dummy image/data.")
+                 dummy_img = torch.zeros(3, IMG_HEIGHT, IMG_WIDTH, dtype=torch.float32)
+                 return subset_idx_val, dummy_img, label_val
+        return subset_idx_val, image, label_val
 
-    run_cnn_feature_extraction()
+# --- Load Places365 Pretrained AlexNet Model (Keep this outside the pipeline function) ---
+def load_alexnet_places365_model(weights_path):
+    print(f"\nLoading AlexNet model architecture (PyTorch)...")
+    try: model = models.alexnet(weights=None)
+    except TypeError: model = models.alexnet(pretrained=False)
+
+    num_ftrs = model.classifier[6].in_features
+    model.classifier[6] = nn.Linear(num_ftrs, 365)
+    print("Adjusted AlexNet classifier for 365 classes.")
+
+    print(f"Loading Places365 weights from: {weights_path}")
+    try:
+        checkpoint = torch.load(weights_path, map_location=device)
+
+        state_dict_from_checkpoint = None
+        if isinstance(checkpoint, dict):
+            if 'state_dict' in checkpoint:
+                state_dict_from_checkpoint = checkpoint['state_dict']
+                # print("Found 'state_dict' key in checkpoint.") # Keep prints minimal after debugging load logic
+            else:
+                 state_dict_from_checkpoint = checkpoint
+                 # print("No common state_dict key found, assuming checkpoint dictionary is the state_dict.")
+        else:
+            state_dict_from_checkpoint = checkpoint
+            # print("Loaded object is not a dictionary, assuming it's the state_dict directly.")
+
+
+        if state_dict_from_checkpoint is None:
+             raise ValueError(f"Could not find state_dict in the loaded checkpoint from {weights_path}.")
+
+        # --- FIX: Create a new state_dict with 'module.' prefix removed ---
+        new_state_dict = {}
+        for k, v in state_dict_from_checkpoint.items():
+            if 'features.module.' in k:
+                name = k.replace('features.module.', 'features.')
+            # elif 'classifier.module.' in k: # Uncomment if classifier keys also have module.
+            #     name = k.replace('classifier.module.', 'classifier.')
+            else:
+                name = k
+            new_state_dict[name] = v
+        # print("Corrected keys in state_dict (replaced 'features.module.' where found).") # Keep prints minimal
+
+        # --- Debug Prints (Optional, remove if you want clean output now) ---
+        # print("\n--- Debug: Inspecting new_state_dict keys BEFORE loading ---")
+        # print(f"Number of keys in new_state_dict: {len(new_state_dict.keys())}")
+        # print("First 20 keys in new_state_dict:")
+        # sorted_keys = sorted(new_state_dict.keys())
+        # for i, key in enumerate(sorted_keys):
+        #     if i < 20:
+        #         print(key)
+        #     else:
+        #         break
+        # print("--------------------------------------------------------\n")
+        # --- End Debug Prints ---
+
+        model.load_state_dict(new_state_dict, strict=True)
+        print("Successfully loaded Places365 weights into AlexNet.")
+
+    except FileNotFoundError:
+        print(f"ERROR: Places365 weights file not found at {weights_path}. Please check the path.")
+        exit()
+    except Exception as e:
+        print(f"ERROR loading Places365 weights (after 'features.module.' fix attempt): {e}")
+        # print("\n--- Debug: Model state_dict keys expected ---") # Optional print
+        # try:
+        #     model_keys = sorted(model.state_dict().keys())
+        #     for i, key in enumerate(model_keys):
+        #          if i < 20: print(key)
+        #          else: break
+        # except Exception as model_e:
+        #      print(f"Could not print model keys: {model_e}")
+        # print("--------------------------------------\n")
+        exit()
+
+    feature_extractor = model.features
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+
+    print("AlexNet 'features' block ready for extraction, weights frozen.")
+    return feature_extractor.to(device)
+
+# --- Define Preprocessing Transform (Keep this outside the pipeline function) ---
+def get_alexnet_preprocessing_transform():
+    print(f"\nDefining preprocessing transform for AlexNet ({IMG_HEIGHT}x{IMG_WIDTH} input)...")
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(IMG_HEIGHT),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    print("AlexNet preprocessing transform defined.")
+    return transform
+
+# --- Feature Extraction Loop and Saving (Keep this outside the pipeline function) ---
+def extract_and_save_features(
+    subset_indices_for_dataset, images_numpy_for_dataset, broad_labels_for_dataset,
+    model_obj, transform_obj, output_filepath):
+    print(f"\nPreparing dataset for {os.path.basename(output_filepath)} with {len(images_numpy_for_dataset)} images.")
+    dataset = TFDSSubsetFeatureDataset(subset_indices_for_dataset, images_numpy_for_dataset, broad_labels_for_dataset, transform=transform_obj)
+
+
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE_PYTORCH_CNN, shuffle=False, num_workers=0, pin_memory=False)
+
+    features_list, actual_indices_processed, actual_labels_processed = [], [], []
+    print(f"Extracting features for {len(dataset)} images...")
+    model_obj.eval()
+    dataloader_tqdm = tqdm(dataloader, desc=f"Extracting {CNN_MODEL_NAME} Features", leave=True)
+    with torch.no_grad():
+        for subset_indices_batch, images_batch, labels_batch in dataloader_tqdm:
+            if images_batch.ndim != 4 or images_batch.shape[1] != 3 or (torch.sum(images_batch) == 0 and images_batch.shape[0] > 0): # Check for zero sum on non-empty batch
+                 dataloader_tqdm.write(f"Skipping a potentially malformed or dummy batch. Subset indices: {subset_indices_batch.tolist()}")
+                 continue
+
+            images_batch = images_batch.to(device)
+
+            try:
+                features_batch = model_obj(images_batch)
+                features_batch_flattened = features_batch.view(features_batch.size(0), -1)
+
+                features_list.extend(features_batch_flattened.cpu().numpy())
+                actual_indices_processed.extend(subset_indices_batch.cpu().tolist())
+                actual_labels_processed.extend(labels_batch.cpu().tolist())
+
+            except Exception as e:
+                dataloader_tqdm.write(f"ERROR processing batch (indices {subset_indices_batch.tolist()}): {e}. Skipping batch.")
+                continue
+
+
+    if features_list:
+        features_array = np.array(features_list)
+        indices_array = np.array(actual_indices_processed, dtype=np.int32)
+        labels_array = np.array(actual_labels_processed, dtype=np.int8)
+
+        print(f"\nSaving extracted data to {output_filepath}...")
+        try:
+            with h5py.File(output_filepath, 'w') as hf:
+                hf.create_dataset('features', data=features_array)
+                hf.create_dataset('subset_indices', data=indices_array)
+                hf.create_dataset('labels', data=labels_array)
+            print(f"Saved: {output_filepath}\n  Features shape: {features_array.shape}, Indices shape: {indices_array.shape}, Labels shape: {labels_array.shape}")
+
+            if features_array.shape[0] != len(images_numpy_for_dataset):
+                 print(f"WARN: Number of saved features ({features_array.shape[0]}) is less than the number of images provided to the dataset ({len(images_numpy_for_dataset)}). This may be due to errors or malformed batches.")
+
+        except Exception as e:
+            print(f"ERROR saving HDF5 file {output_filepath}: {e}")
+    else:
+        print(f"No features were successfully extracted for {os.path.basename(output_filepath)}. No file saved.")
+
+
+# --- Main Execution Pipeline (All data loading/prep moves HERE) ---
+def extract_alexnet_places365_features_pipeline():
+    if torch.cuda.is_available():
+        print(f"PyTorch using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("PyTorch using CPU.")
+
+    os.makedirs(CNN_EXTRACTED_FEATURES_DIR, exist_ok=True)
+    print(f"Saving extracted features to: {CNN_EXTRACTED_FEATURES_DIR}")
+
+    # --- 1. Load TFDS Dataset Definition (MOVED HERE) ---
+    print("--- Defining TFDS Data Source ---")
+    tf.config.set_visible_devices([], 'GPU')
+
+    ds_train_tfds = tfds.load(
+        'places365_small',
+        split='train',
+        data_dir=TFDS_DATA_DIR,
+        shuffle_files=False,
+    )
+
+    ds_subset_tfds = ds_train_tfds.shuffle(buffer_size=max(TFDS_SUBSET_SIZE * 2, 2048), seed=TFDS_RANDOM_SEED, reshuffle_each_iteration=False)
+    ds_subset_indexed_tfds = ds_subset_tfds.take(TFDS_SUBSET_SIZE).enumerate()
+
+    # --- 2. Load Train/Test Split Indices and Broad Category Labels from NPZ (MOVED HERE) ---
+    print(f"Loading train/test split data (subset indices and broad labels) from: {NPZ_FILE_SUBSET_SPLIT}")
+    try:
+        split_data = np.load(NPZ_FILE_SUBSET_SPLIT)
+        subset_train_indices_npz = split_data['train_indices'].tolist()
+        subset_test_indices_npz = split_data['test_indices'].tolist()
+        y_train_broad_npz = split_data['train_labels_numeric'].tolist()
+        y_test_broad_npz = split_data['test_labels_numeric'].tolist()
+
+        if len(subset_train_indices_npz) != len(y_train_broad_npz) or \
+           len(subset_test_indices_npz) != len(y_test_broad_npz):
+            print("ERROR: Mismatch between number of indices and labels in NPZ file. Halting.")
+            exit()
+        print(f"Loaded {len(subset_train_indices_npz)} train indices/labels and {len(subset_test_indices_npz)} test indices/labels from NPZ.")
+    except FileNotFoundError:
+        print(f"ERROR: NPZ file not found at {NPZ_FILE_SUBSET_SPLIT}.")
+        exit()
+    except KeyError as e:
+        print(f"ERROR: Missing key {e} in NPZ file. Ensure 'train_indices', 'test_indices', 'train_labels_numeric', 'test_labels_numeric' exist.")
+        exit()
+    except Exception as e:
+        print(f"An unexpected error occurred loading NPZ: {e}")
+        exit()
+
+    # --- 3. Cache ONLY the REQUIRED Images from TFDS (MOVED HERE) ---
+    all_required_subset_indices_set = set(subset_train_indices_npz + subset_test_indices_npz)
+    print(f"Identified {len(all_required_subset_indices_set)} unique subset indices required from NPZ splits.")
+
+    print(f"Caching ONLY the {len(all_required_subset_indices_set)} required images from TFDS...")
+    required_idx_to_image_map = {}
+    num_found_in_tfds = 0
+    for i_tensor, item in tqdm(ds_subset_indexed_tfds.as_numpy_iterator(), total=TFDS_SUBSET_SIZE, desc="Filtering/Caching TFDS images"):
+        current_subset_idx = int(i_tensor)
+        if current_subset_idx in all_required_subset_indices_set:
+            required_idx_to_image_map[current_subset_idx] = item['image']
+            num_found_in_tfds += 1
+            if num_found_in_tfds == len(all_required_subset_indices_set):
+                print(f"All {num_found_in_tfds} required images have been found and cached. Breaking TFDS iteration.")
+                break
+    print(f"Cached {len(required_idx_to_image_map)} images from TFDS that are present in train/test splits.")
+
+    if num_found_in_tfds < len(all_required_subset_indices_set):
+        print(f"WARNING: Only found {num_found_in_tfds} out of {len(all_required_subset_indices_set)} required images in the TFDS subset defined by TFDS_SUBSET_SIZE and TFDS_RANDOM_SEED. Some indices from your NPZ may be out of bounds or not in that specific subset sequence.")
+
+    # --- 4. Prepare Data Lists for PyTorch Dataset (MOVED HERE) ---
+    # For training set
+    images_train_actual_numpy = []
+    y_train_actual_broad = []
+    actual_train_subset_indices = []
+
+    for i in range(len(subset_train_indices_npz)):
+        idx = subset_train_indices_npz[i]
+        if idx in required_idx_to_image_map:
+            images_train_actual_numpy.append(required_idx_to_image_map[idx])
+            y_train_actual_broad.append(y_train_broad_npz[i])
+            actual_train_subset_indices.append(idx)
+    y_train_actual_broad = np.array(y_train_actual_broad)
+
+    # For testing set
+    images_test_actual_numpy = []
+    y_test_actual_broad = []
+    actual_test_subset_indices = []
+
+    for i in range(len(subset_test_indices_npz)):
+        idx = subset_test_indices_npz[i]
+        if idx in required_idx_to_image_map:
+            images_test_actual_numpy.append(required_idx_to_image_map[idx])
+            y_test_actual_broad.append(y_test_broad_npz[i])
+            actual_test_subset_indices.append(idx)
+    y_test_actual_broad = np.array(y_test_actual_broad)
+
+    print(f"Prepared {len(images_train_actual_numpy)} images for training.")
+    print(f"Prepared {len(images_test_actual_numpy)} images for testing.")
+
+    if not images_train_actual_numpy or not images_test_actual_numpy:
+        print("ERROR: No valid images found for train or test after filtering based on NPZ indices. Cannot proceed.")
+        exit()
+
+    # Clear the large map after preparing split-specific lists
+    del required_idx_to_image_map
+    gc.collect()
+    print("Cleaned up intermediate image cache map.")
+    # --- End of data loading/prep moved here ---
+
+
+    # Load the model (already defined outside, call it here)
+    feature_extractor_model = load_alexnet_places365_model(PLACES365_WEIGHTS_PATH)
+    # Define preprocessing transform (already defined outside, call it here)
+    preprocessing_transform = get_alexnet_preprocessing_transform()
+
+    output_file_suffix = f"subset{TFDS_SUBSET_SIZE}_seed{TFDS_RANDOM_SEED}"
+
+    # --- Process Training Set ---
+    train_output_filepath = os.path.join(CNN_EXTRACTED_FEATURES_DIR, f'X_train_{CNN_MODEL_NAME.lower()}_features_{output_file_suffix}.h5')
+    # These variables are now defined in the scope of this function
+    extract_and_save_features(actual_train_subset_indices, images_train_actual_numpy, y_train_actual_broad,
+                              feature_extractor_model, preprocessing_transform, train_output_filepath)
+
+    # Explicitly delete train data to free memory before processing test data
+    del images_train_actual_numpy, y_train_actual_broad, actual_train_subset_indices
+    gc.collect()
+    print("Cleaned up training data from RAM.")
+
+    # --- Process Testing Set ---
+    test_output_filepath = os.path.join(CNN_EXTRACTED_FEATURES_DIR, f'X_test_{CNN_MODEL_NAME.lower()}_features_{output_file_suffix}.h5')
+     # These variables are now defined in the scope of this function
+    extract_and_save_features(actual_test_subset_indices, images_test_actual_numpy, y_test_actual_broad,
+                              feature_extractor_model, preprocessing_transform, test_output_filepath)
+
+    # Clean up test data too
+    del images_test_actual_numpy, y_test_actual_broad, actual_test_subset_indices
+    gc.collect()
+    print("Cleaned up testing data from RAM.")
+
+
+    print(f"\n--- PyTorch CNN Feature Extraction Pipeline Complete ({CNN_MODEL_NAME}) ---")
+

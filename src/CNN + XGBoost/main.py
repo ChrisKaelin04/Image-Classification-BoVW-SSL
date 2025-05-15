@@ -1,7 +1,8 @@
 import sys
-from extract_cnn_features import extract_cnn_features
+from extract_cnn_features import extract_alexnet_places365_features_pipeline
 from Label_Split import split_data
 from CNN_XGBoost_SVM import run_cnn_xgb_classification
+from download_places import download_dataset
 
 '''
 Note 1: This script assumes you already have the data downloaded. Running the main for BoVW_Vanilla will set it up for you. Then come back here.
@@ -13,11 +14,11 @@ def main():
     Main function to orchestrate the workflow.
     """
     print("Starting the Image Classification Pipeline...")
-
-    # Step 1: Extract features using CNN (we already have the data downloaded)
-    extract_cnn_features()
+    #download_dataset()
+    # Step 1: Extract features using CNN
+    extract_alexnet_places365_features_pipeline()
     
-    # Step 2: Split the data into the 4 categories
+    # Step 2: Split the data into the 4 categories. Ensure HOG exists as that helps us maintain tags
     split_data()
     
     # Step 3: Train the model using XGBoost, then test it

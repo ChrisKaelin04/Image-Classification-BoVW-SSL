@@ -4,29 +4,39 @@ import pickle
 import warnings
 import joblib
 import h5py # For loading HOG data
+import pandas as pd # Added for reading the subset index map
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
 from sklearn.model_selection import GridSearchCV, train_test_split
-from sklearn.preprocessing import StandardScaler # <-- Import StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import seaborn as sns
 import xgboost as xgb
 import traceback
 import gc
+import glob # For finding the subset map file
 
 # --- Configuration ---
-FEATURES_DIR_SPM = r"E:\CV_features_SPM"
-BOVW_SPM_FEATURES_DIR = os.path.join(FEATURES_DIR_SPM, "bovw_spm_features_4cat")
-HOG_DATA_FILE = os.path.join(FEATURES_DIR_SPM, 'hog_data_spm.h5')
-SPLITS_DIR_COMMON = os.path.join(r"E:\CV_features", "train_test_splits_4cat_revised")
-NPZ_FILE = os.path.join(SPLITS_DIR_COMMON, "train_test_split_data_4cat_revised.npz")
+FEATURES_DIR_SPM = r"E:\CV_features_SPM" # Directory for SPM feature batches, vocabularies, HOG_SPM, etc.
+BOVW_SPM_FEATURES_DIR = os.path.join(FEATURES_DIR_SPM, "bovw_spm_features_4cat") # Directory for saved SPM .npy histograms
+HOG_DATA_FILE_SPM = os.path.join(FEATURES_DIR_SPM, 'hog_data_spm.h5') # HOG data saved with subset indices
+
+# Updated path for the subset index -> label map saved during extraction
+SUBSET_INDEX_LABEL_MAP_FILE_PATTERN = os.path.join(FEATURES_DIR_SPM, 'subset_index_label_map_subset*_seed*.csv')
+
+# ASSUMPTION: This NPZ file now contains train/test splits defined by *subset indices*
+SPLITS_DIR_COMMON = os.path.join(r"E:\CV_features", "train_test_splits_4cat_revised") # Assuming this dir exists
+NPZ_FILE_SUBSET_SPLIT = os.path.join(SPLITS_DIR_COMMON, "train_test_split_data_4cat_revised.npz")
+
 LABEL_ENCODER_FILE = os.path.join(SPLITS_DIR_COMMON, "broad_label_encoder_4cat_revised.pkl")
 RESULTS_DIR_XGB_SPM = os.path.join(FEATURES_DIR_SPM, "classification_results_XGB_SPM_SOH_4cat")
 os.makedirs(RESULTS_DIR_XGB_SPM, exist_ok=True)
 DMATRIX_CACHE_DIR = os.path.join(FEATURES_DIR_SPM, "xgb_dmatrix_cache_4cat")
 os.makedirs(DMATRIX_CACHE_DIR, exist_ok=True)
+
+# Match VOCAB_SIZE and PYRAMID_LEVELS to what was used during histogram creation
 VOCAB_SIZE = 1000
-PYRAMID_LEVELS = 3
+PYRAMID_LEVELS = 2
 
 # --- Hyperparameters ---
 XGB_BASE_PARAMS = {
@@ -42,7 +52,7 @@ PARAM_GRID_XGB = {
     'max_depth': [7],
 }
 GRIDSEARCH_CV_FOLDS = 3
-SAMPLE_FRACTION_FOR_GRIDSEARCH = 0.25 # (if memory allows)
+SAMPLE_FRACTION_FOR_GRIDSEARCH = 1 # 1 means use the full available training set for tuning
 # Change scoring metric for GridSearchCV to handle imbalance
 GRIDSEARCH_SCORING = 'f1_macro' # Or 'recall_macro'
 
@@ -50,26 +60,73 @@ warnings.filterwarnings("ignore", message="Parameters: {.*use_label_encoder.*} a
 warnings.filterwarnings("ignore", message="omp_set_nested routine deprecated, please use omp_set_max_active_levels instead.", category=UserWarning)
 
 
-# --- 1. Load Labels, Indices, and Label Encoder ---
-print("--- Loading Common Data (Labels, Splits, Encoder) ---")
-print(f"Loading train/test split data from: {NPZ_FILE}")
+# --- 1. Load Common Data (Labels, Subset Split Indices, Label Encoder) ---
+print("--- Loading Common Data (Labels, Subset Splits, Encoder) ---")
+
+# Load the subset index -> label map file
+map_files = glob.glob(SUBSET_INDEX_LABEL_MAP_FILE_PATTERN)
+if not map_files:
+    print(f"ERROR: Subset index map file not found matching pattern: {SUBSET_INDEX_LABEL_MAP_FILE_PATTERN}")
+    print("Please run SOH_extract_SPM.py first to generate this file.")
+    exit()
+# Assuming only one such file exists, pick the first one found
+subset_map_file = map_files[0]
+print(f"Loading subset index map from: {subset_map_file}")
 try:
-    split_data = np.load(NPZ_FILE)
-    train_indices_full = split_data['train_indices']
-    test_indices_full = split_data['test_indices']
-    y_train_full = split_data['train_labels_numeric']
-    y_test_full = split_data['test_labels_numeric']
+    subset_map_df = pd.read_csv(subset_map_file)
+    # Create a dictionary mapping subset_idx to label
+    # This dict contains all subset indices that were processed in extraction
+    subset_idx_to_label_all = dict(zip(subset_map_df['subset_idx'], subset_map_df['label']))
+    print(f"Loaded map for {len(subset_idx_to_label_all)} subset indices.")
+
+    # Also parse subset size and seed from the filename for later NPY loading
+    try:
+         parts = os.path.basename(subset_map_file).split('_')
+         MAP_SUBSET_SIZE = int(parts[3].replace('subset', ''))
+         MAP_RANDOM_SEED = int(parts[4].replace('seed', '').replace('.csv', ''))
+         print(f"Parsed subset size: {MAP_SUBSET_SIZE}, seed: {MAP_RANDOM_SEED} from map filename.")
+    except Exception as e:
+         print(f"Warning: Could not parse subset size/seed from map filename ({subset_map_file}): {e}. Using generic filenames for features.")
+         MAP_SUBSET_SIZE = None # Indicate parsing failed
+         MAP_RANDOM_SEED = None
+
+except Exception as e:
+    print(f"ERROR loading or processing subset index map file {subset_map_file}: {e}")
+    exit()
+
+
+# Load the train/test splits defined by *subset indices* from the NPZ file
+print(f"Loading train/test split data (assuming subset indices) from: {NPZ_FILE_SUBSET_SPLIT}")
+try:
+    split_data = np.load(NPZ_FILE_SUBSET_SPLIT)
+    # These are the subset indices that constitute the train and test splits
+    subset_train_indices_npz = split_data['train_indices'].tolist()
+    subset_test_indices_npz = split_data['test_indices'].tolist()
+    # These are the labels corresponding to the indices in subset_train_indices_npz / subset_test_indices_npz
+    y_train_npz = split_data['train_labels_numeric'].tolist()
+    y_test_npz = split_data['test_labels_numeric'].tolist()
+
+    print(f"Loaded {len(subset_train_indices_npz)} subset training indices/labels and {len(subset_test_indices_npz)} subset testing indices/labels from NPZ.")
+
+    # Optional: Verify consistency between NPZ labels and Map labels for these indices
+    # This is good for debugging but might be slow for large datasets
+    # for i, subset_idx in enumerate(subset_train_indices_npz):
+    #      if subset_idx in subset_idx_to_label_all and subset_idx_to_label_all[subset_idx] != y_train_npz[i]:
+    #           print(f"Warning: Label mismatch for subset_idx {subset_idx} between NPZ ({y_train_npz[i]}) and Map ({subset_idx_to_label_all[subset_idx]})")
+    #      elif subset_idx not in subset_idx_to_label_all:
+    #           print(f"Warning: subset_idx {subset_idx} from NPZ train split not found in full map.")
+
 except FileNotFoundError:
-    print(f"ERROR: NPZ file not found at {NPZ_FILE}. Ensure label splitting script has run.")
+    print(f"ERROR: NPZ file not found at {NPZ_FILE_SUBSET_SPLIT}. Make sure it contains train/test splits based on *subset indices*.")
     exit()
 except KeyError as e:
-    print(f"ERROR: Missing key {e} in NPZ file {NPZ_FILE}. Check keys.")
+    print(f"ERROR: Missing key {e} in NPZ file {NPZ_FILE_SUBSET_SPLIT}. Make sure it contains train/test splits based on *subset indices*.")
     exit()
-print(f"Loaded {len(train_indices_full)} total train indices and {len(y_train_full)} labels.")
-print(f"Loaded {len(test_indices_full)} total test indices and {len(y_test_full)} labels.")
-if len(train_indices_full) != len(y_train_full) or len(test_indices_full) != len(y_test_full):
-    print("ERROR: Mismatch between number of indices and labels. Halting.")
+except Exception as e:
+    print(f"ERROR loading or processing NPZ file {NPZ_FILE_SUBSET_SPLIT}: {e}")
     exit()
+
+
 print(f"Loading label encoder from: {LABEL_ENCODER_FILE}")
 try:
     with open(LABEL_ENCODER_FILE, 'rb') as f:
@@ -84,19 +141,39 @@ except FileNotFoundError:
     print(f"ERROR: Label encoder file not found at {LABEL_ENCODER_FILE}.")
     exit()
 
-# --- Check Class Distribution ---
-print("\n--- Class Distribution Check ---")
-unique_train, counts_train = np.unique(y_train_full, return_counts=True)
+# --- Filter Indices to Use (Must be in NPZ split AND had successful extraction) ---
+# We only use indices from the NPZ split list that actually had features extracted (label != -1 in the map)
+print("\nFiltering indices to include only those with successful feature extraction...")
+subset_indices_extracted_success = {idx for idx, label in subset_idx_to_label_all.items() if label != -1}
+
+actual_train_subset_indices = sorted([idx for idx in subset_train_indices_npz if idx in subset_indices_extracted_success])
+actual_test_subset_indices = sorted([idx for idx in subset_test_indices_npz if idx in subset_indices_extracted_success])
+
+# Get the corresponding labels for these filtered, sorted lists of indices
+# Look up labels in the full map and order them to match the sorted index lists
+y_train = np.array([subset_idx_to_label_all[idx] for idx in actual_train_subset_indices])
+y_test = np.array([subset_idx_to_label_all[idx] for idx in actual_test_subset_indices])
+
+print(f"Using {len(actual_train_subset_indices)} subset indices for training (filtered).")
+print(f"Using {len(actual_test_subset_indices)} subset indices for testing (filtered).")
+
+if len(actual_train_subset_indices) == 0 or len(actual_test_subset_indices) == 0:
+    print("ERROR: No valid subset indices found for train or test after filtering. Cannot proceed.")
+    exit()
+
+# --- Check Final Class Distribution ---
+print("\n--- Final Train/Test Set Class Distribution Check (using filtered indices) ---")
+unique_train, counts_train = np.unique(y_train, return_counts=True)
 print("Training set class distribution:")
 for label, count in zip(unique_train, counts_train):
-    print(f"  Class {label} ({class_names[label]}): {count} samples ({count/len(y_train_full):.2%})")
-unique_test, counts_test = np.unique(y_test_full, return_counts=True)
+    print(f"  Class {label} ({class_names[label]}): {count} samples ({count/len(y_train):.2%})")
+unique_test, counts_test = np.unique(y_test, return_counts=True)
 print("Test set class distribution:")
 for label, count in zip(unique_test, counts_test):
-    print(f"  Class {label} ({class_names[label]}): {count} samples ({count/len(y_test_full):.2%})")
+    print(f"  Class {label} ({class_names[label]}): {count} samples ({count/len(y_test):.2%})")
 
 
-# --- 2. Helper Functions ---
+# --- 2. Helper Functions (plot_confusion_matrix remains the same) ---
 def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.cm.Blues, results_path=None, filename=None):
     plt.figure(figsize=(max(8, len(classes)), max(6, len(classes)*0.8)))
     sns.heatmap(cm, annot=True, fmt="d", cmap=cmap, xticklabels=classes, yticklabels=classes)
@@ -111,252 +188,364 @@ def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.c
     plt.close()
 
 
-# --- Feature Loading ---
-def load_spm_features(spm_bovw_dir, feature_name, pyramid_levels_count, set_indices, is_train_set):
-    """Loads SPM features corresponding to the given indices."""
+# --- Feature Loading Functions (Rewritten for Subset Indices) ---
+
+def load_spm_features_by_subset_indices(spm_bovw_dir, feature_name, pyramid_levels_count, requested_subset_indices, total_subset_size=None, seed=None):
+    """
+    Loads SPM features from a .npy file and aligns them to the requested subset indices.
+    Assumes the .npy file rows are ordered by the subset indices passed to histogram_creation_SPM.
+    """
     max_level_index = pyramid_levels_count - 1
-    set_type = "train" if is_train_set else "test"
-    filename = f"X_{set_type}_{feature_name}_spm_L{max_level_index}.npy"
-    filepath = os.path.join(spm_bovw_dir, filename)
-    if os.path.exists(filepath):
-        print(f"Loading ALL {set_type} {feature_name} SPM (L{max_level_index}) features from: {filepath}")
-        all_data = np.load(filepath)
-        print(f"  Full shape: {all_data.shape}")
-
-        # --- Logic to select correct rows based on indices ---
-        # We need the *original* indices of the full loaded data to map correctly.
-        # This assumes the order in the .npy file matches the order in train_indices_full/test_indices_full.
-        # A safer way would be to save indices alongside the features in the .npy, but let's assume order matches splits.
-        full_indices_in_npy_order = train_indices_full if is_train_set else test_indices_full
-
-        if all_data.shape[0] == len(full_indices_in_npy_order):
-            if len(set_indices) == len(full_indices_in_npy_order): # Requesting the full set
-                 print("  Using full set data.")
-                 return all_data
-            else: # Requesting a subset (e.g., for sampling)
-                 print(f"  Sub-selecting {len(set_indices)} rows for the current request.")
-                 try:
-                      # Create a mapping from the original index (as in splits) to the row index in the NPY file
-                      map_original_idx_to_row_in_npy = {idx: i for i, idx in enumerate(full_indices_in_npy_order)}
-                      
-                      selected_row_indices_in_npy = [map_original_idx_to_row_in_npy[idx] for idx in set_indices if idx in map_original_idx_to_row_in_npy]
-
-                      if len(selected_row_indices_in_npy) != len(set_indices):
-                           print(f"  Warning: Could only find {len(selected_row_indices_in_npy)} out of {len(set_indices)} requested indices in the loaded NPY data's implied map.")
-                      
-                      # Ensure the selected rows are returned in the order of set_indices
-                      # Need to sort the selected row indices according to the order of set_indices
-                      # Create a mapping from set_indices elements back to their desired order
-                      desired_order_map = {idx: i for i, idx in enumerate(set_indices)}
-                      # Get the data for the selected rows
-                      selected_data = all_data[selected_row_indices_in_npy, :]
-                      # Get the original indices corresponding to the selected data rows
-                      original_indices_of_selected_data = [full_indices_in_npy_order[i] for i in selected_row_indices_in_npy]
-                      # Create a list of tuples (desired_order, data_row) and sort
-                      sorted_data_with_order = sorted(zip([desired_order_map[idx] for idx in original_indices_of_selected_data], selected_data), key=lambda item: item[0])
-                      # Extract the data in the desired order
-                      return np.array([data_row for _, data_row in sorted_data_with_order])
-
-
-                 except Exception as e:
-                      print(f"ERROR during sub-selection based on indices: {e}. Indices might not match NPY structure or mapping logic has an issue.")
-                      # print(traceback.format_exc()) # Optional detailed traceback
-                      return None
-        else:
-             print(f"ERROR: Loaded NPY data rows ({all_data.shape[0]}) does not match expected full split size ({len(full_indices_in_npy_order)}). Cannot reliably select rows.")
-             return None
+    # Construct filename based on naming convention from histogram_creation_SPM
+    if total_subset_size is not None and seed is not None:
+         # Use the specific filename if subset size and seed are known
+         filename_pattern = f"X_*_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_subset{total_subset_size}_seed{seed}.npy"
     else:
-        print(f"Warning: {feature_name} SPM (L{max_level_index}) file not found: {filepath}")
+         # Fallback to a more general pattern if subset size/seed are unknown/parsing failed
+         filename_pattern = f"X_*_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_*.npy" # Match any subset/seed pattern
+         # Also include the generic filename pattern just in case
+         filename_pattern_generic = f"X_*_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_processed*.npy"
+         print(f"Warning: Subset size or seed not parsed, using general pattern: {filename_pattern} or {filename_pattern_generic}")
+
+
+    # Find the actual file path(s) matching the pattern
+    if total_subset_size is not None and seed is not None:
+         filepaths = glob.glob(os.path.join(spm_bovw_dir, filename_pattern))
+    else:
+         filepaths = glob.glob(os.path.join(spm_bovw_dir, filename_pattern)) + \
+                     glob.glob(os.path.join(spm_bovw_dir, filename_pattern_generic))
+
+    if not filepaths:
+        print(f"Error: No {feature_name} SPM (L{max_level_index}) file found matching pattern in {spm_bovw_dir}.")
         return None
 
-def load_and_align_global_hog(hog_h5_filepath, target_indices_for_set):
-    """Loads and aligns HOG features corresponding to the target indices."""
+    # Assuming there's only one relevant train/test file matching the pattern
+    # Filter for train or test based on requested_subset_indices
+    # A better approach is to name the NPY file based on train/test split explicitly
+    # The histogram script saves as X_train_... and X_test_...
+    set_type = "train" if all(idx in actual_train_subset_indices for idx in requested_subset_indices) and len(requested_subset_indices) > 0 else "test"
+    # Refined filename pattern based on set_type
+    if total_subset_size is not None and seed is not None:
+         filename = f"X_{set_type}_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_subset{total_subset_size}_seed{seed}.npy"
+    else:
+         filename = f"X_{set_type}_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_*.npy"
+         filename_generic = f"X_{set_type}_{feature_name}_spm_L{max_level_index}_k{VOCAB_SIZE}_processed*.npy"
+         
+    filepaths_filtered = glob.glob(os.path.join(spm_bovw_dir, filename))
+    if not filepaths_filtered and total_subset_size is None or seed is None: # Try generic if specific fails
+         filepaths_filtered = glob.glob(os.path.join(spm_bovw_dir, filename_generic))
+
+    if not filepaths_filtered:
+         print(f"Error: No {set_type} {feature_name} SPM (L{max_level_index}) file found matching expected filename ({filename} or {filename_generic}) in {spm_bovw_dir}.")
+         return None
+
+    # Use the first matching file found
+    filepath = filepaths_filtered[0]
+    print(f"Loading {set_type} {feature_name} SPM (L{max_level_index}) features from: {filepath}")
+
+    try:
+        all_data = np.load(filepath)
+        print(f"  Full loaded shape: {all_data.shape}")
+    except Exception as e:
+         print(f"Error loading NPY file {filepath}: {e}")
+         return None
+
+
+    # --- Index Alignment ---
+    # The .npy file rows are ordered by the sorted list of subset indices passed to process_subset_indices_spm_parallel
+    # in histogram_creation_SPM. These lists were actual_train_subset_indices and actual_test_subset_indices.
+    # So, the indices corresponding to the rows in the *full* loaded NPY file are simply
+    # actual_train_subset_indices (if loading X_train) or actual_test_subset_indices (if loading X_test), sorted.
+    
+    # Need the full list of indices that were used to generate the NPY file *in their sorted order*
+    # This requires knowing if the NPY is for train or test and accessing the corresponding actual_ indices list.
+    # This is a bit circular dependency.
+
+    # A more robust way: histogram_creation_SPM should save a small NPY file alongside the features NPY
+    # containing the sorted list of subset indices that correspond to the rows in the features NPY.
+    # E.g., save X_train_sift_spm_L1.npy AND train_sift_spm_L1_indices.npy
+
+    # --- ASSUMPTION: Let's assume the NPY file *is* sorted by subset index, and the indices
+    # that were used to generate it are the `actual_train_subset_indices` or `actual_test_subset_indices`.
+    # The order of rows in the NPY file *is* the sorted order of those lists.
+
+    # Get the list of indices that correspond to the rows in the loaded NPY file
+    # This depends on which NPY file was loaded (train or test)
+    indices_in_npy_order = actual_train_subset_indices if set_type == "train" else actual_test_subset_indices
+    indices_in_npy_order = sorted(indices_in_npy_order) # Ensure it's sorted
+
+
+    if all_data.shape[0] != len(indices_in_npy_order):
+        print(f"ERROR: Loaded NPY data rows ({all_data.shape[0]}) does not match the expected number of indices ({len(indices_in_npy_order)}) for {set_type}. Misalignment is HIGHLY likely.")
+        return None # Critical error: Data rows don't match the expected indices count
+
+
+    # Map subset indices present in the NPY file to their row index in the NPY array
+    subset_idx_to_row_in_npy = {idx: i for i, idx in enumerate(indices_in_npy_order)}
+
+    # Build a list of row indices from the NPY that correspond to the requested subset indices
+    # And simultaneously build a list to store the features in the requested order
+    selected_features_ordered = []
+    missing_indices_count = 0
+
+    for requested_idx in requested_subset_indices:
+        row_in_npy = subset_idx_to_row_in_npy.get(requested_idx)
+        if row_in_npy is not None:
+            # Append the feature vector from the NPY at that row index
+            selected_features_ordered.append(all_data[row_in_npy, :])
+        else:
+            # Handle case where a requested index was not found in the NPY data (e.g., extraction failed for it)
+            # Append a zero vector of the expected dimension
+            feature_dim = all_data.shape[1] if all_data.shape[1] > 0 else (VOCAB_SIZE * sum([(2**l)**2 for l in range(pyramid_levels_count)])) # Fallback dim calc
+            selected_features_ordered.append(np.zeros(feature_dim, dtype=np.float32))
+            missing_indices_count += 1
+
+    if missing_indices_count > 0:
+        print(f"  Warning: {missing_indices_count}/{len(requested_subset_indices)} requested {feature_name} SPM features were not found in the loaded NPY data. Used zero vectors.")
+
+
+    if not selected_features_ordered:
+         print(f"  No {feature_name} SPM features were selected for the requested indices.")
+         return np.empty((0, all_data.shape[1] if all_data.shape[1] > 0 else 0), dtype=np.float32)
+
+
+    # Stack the selected features into a single NumPy array, already in the requested order
+    try:
+        aligned_features_array = np.vstack(selected_features_ordered)
+        print(f"  Aligned {feature_name} SPM features shape for requested indices: {aligned_features_array.shape}")
+        return aligned_features_array
+    except ValueError as e:
+        print(f"ERROR: Could not stack selected {feature_name} SPM features: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error stacking selected {feature_name} SPM features: {e}")
+        return None
+    finally:
+        # Clean up the full loaded data
+        del all_data
+        gc.collect()
+
+
+def load_and_align_global_hog_by_subset_indices(hog_h5_filepath, requested_subset_indices):
+    """
+    Loads global HOG features from HDF5 and aligns them to the requested subset indices.
+    Assumes the HDF5 contains 'hog_features' and 'indices' (subset indices).
+    """
     if not os.path.exists(hog_h5_filepath):
         print(f"Warning: Global HOG data file not found: {hog_h5_filepath}")
         return None
-    print(f"Loading global HOG features from: {hog_h5_filepath} for {len(target_indices_for_set)} indices.")
+
+    print(f"Loading global HOG features from: {hog_h5_filepath} for {len(requested_subset_indices)} requested subset indices.")
+
     try:
         with h5py.File(hog_h5_filepath, 'r') as hf:
             if 'hog_features' not in hf or 'indices' not in hf:
                 print(f"ERROR: 'hog_features' or 'indices' not found in HDF5 file: {hog_h5_filepath}")
                 return None
             all_hog_features = hf['hog_features'][:]
-            all_hog_original_indices = hf['indices'][:]
+            all_hog_subset_indices = hf['indices'][:] # These are the subset indices
     except Exception as e:
         print(f"Error loading HOG data from {hog_h5_filepath}: {e}")
         return None
 
-    if all_hog_features.size == 0 or all_hog_original_indices.size == 0:
+    if all_hog_features.size == 0 or all_hog_subset_indices.size == 0:
         print(f"Warning: HOG features or indices in {hog_h5_filepath} are empty.")
-        return np.empty((len(target_indices_for_set), 0), dtype=np.float32)
+        # Return empty array with 0 feature dimension, but correct number of samples for requested indices
+        return np.empty((len(requested_subset_indices), 0), dtype=np.float32)
 
     # Ensure HOG features are 2D (samples x features)
     if all_hog_features.ndim == 1:
-        if all_hog_original_indices.ndim == 1 and all_hog_original_indices.shape[0] > 0 and all_hog_features.shape[0] % all_hog_original_indices.shape[0] == 0:
-            expected_dim = all_hog_features.shape[0] // all_hog_original_indices.shape[0]
-            print(f"  Reshaping 1D HOG features into ({all_hog_original_indices.shape[0]}, {expected_dim})")
-            all_hog_features = all_hog_features.reshape(all_hog_original_indices.shape[0], expected_dim)
+        if all_hog_subset_indices.ndim == 1 and all_hog_subset_indices.shape[0] > 0 and all_hog_features.shape[0] % all_hog_subset_indices.shape[0] == 0:
+            expected_dim = all_hog_features.shape[0] // all_hog_subset_indices.shape[0]
+            print(f"  Reshaping 1D HOG features into ({all_hog_subset_indices.shape[0]}, {expected_dim})")
+            all_hog_features = all_hog_features.reshape(all_hog_subset_indices.shape[0], expected_dim)
         else:
-            print(f"ERROR: Cannot safely reshape 1D HOG features. Indices count {all_hog_original_indices.shape[0]}, Feature len {all_hog_features.shape[0]}")
+            print(f"ERROR: Cannot safely reshape 1D HOG features. Indices count {all_hog_subset_indices.shape[0]}, Feature len {all_hog_features.shape[0]}")
             return None
     elif all_hog_features.ndim != 2:
          print(f"ERROR: HOG features are not 2-dimensional (shape: {all_hog_features.shape})")
          return None
 
-    if all_hog_features.shape[0] != all_hog_original_indices.shape[0]:
-        print(f"ERROR: Mismatch between HOG features ({all_hog_features.shape[0]}) and indices ({all_hog_original_indices.shape[0]})")
+    if all_hog_features.shape[0] != all_hog_subset_indices.shape[0]:
+        print(f"ERROR: Mismatch between HOG features ({all_hog_features.shape[0]}) and subset indices ({all_hog_subset_indices.shape[0]}) in HDF5")
         return None
 
     hog_feature_dim = all_hog_features.shape[1]
-    print(f"  Found {all_hog_features.shape[0]} total HOG features with dimension {hog_feature_dim}.")
+    print(f"  Found {all_hog_features.shape[0]} total HOG features with dimension {hog_feature_dim} in HDF5.")
 
+    # Map subset indices present in the HDF5 to their row index in the HDF5 array
     try:
-       all_hog_original_indices_int = [int(i) for i in all_hog_original_indices]
-       hog_feature_map = {original_idx: i for i, original_idx in enumerate(all_hog_original_indices_int)}
+       all_hog_subset_indices_int = [int(i) for i in all_hog_subset_indices]
+       hog_subset_idx_to_row_in_h5 = {subset_idx: i for i, subset_idx in enumerate(all_hog_subset_indices_int)}
     except (ValueError, TypeError) as e:
-        print(f"ERROR: HOG original indices seem to be of an invalid type: {e}")
+        print(f"ERROR: HOG subset indices from HDF5 seem to be of an invalid type: {e}")
         return None
 
-    aligned_hog_list = []
+    # Build a list to store the HOG features in the requested order
+    selected_hog_features_ordered = []
     missing_count = 0
     placeholder = np.zeros(hog_feature_dim, dtype=all_hog_features.dtype)
 
-    # Build a list of (desired_order_index, actual_feature_row)
-    features_to_sort = []
-    target_indices_map = {idx: i for i, idx in enumerate(target_indices_for_set)} # Map original index to desired order
-
-    for original_idx in target_indices_for_set:
-        map_index = hog_feature_map.get(int(original_idx))
-        if map_index is not None:
-            # Store tuple (desired order index, actual feature row from loaded data)
-            features_to_sort.append((target_indices_map[original_idx], all_hog_features[map_index]))
+    for requested_idx in requested_subset_indices:
+        row_in_h5 = hog_subset_idx_to_row_in_h5.get(int(requested_idx))
+        if row_in_h5 is not None:
+            # Append the HOG feature vector from the HDF5 at that row index
+            selected_hog_features_ordered.append(all_hog_features[row_in_h5, :])
         else:
-            # Store tuple (desired order index, placeholder)
-            features_to_sort.append((target_indices_map[original_idx], placeholder))
+            # Handle case where a requested index was not found in the HOG data (e.g., extraction failed for HOG for this image)
+            # Append a zero vector of the expected dimension
+            selected_hog_features_ordered.append(placeholder)
             missing_count += 1
 
-    # Sort the list based on the desired order index
-    sorted_aligned_hog_list = [feature for _, feature in sorted(features_to_sort, key=lambda item: item[0])]
-
-
     if missing_count > 0:
-        print(f"  Warning: {missing_count}/{len(target_indices_for_set)} HOG features for the target indices not found. Used zero vectors.")
+        print(f"  Warning: {missing_count}/{len(requested_subset_indices)} requested HOG features were not found in the HDF5 data. Used zero vectors.")
 
-    if not sorted_aligned_hog_list:
-        print("  No target indices provided, returning empty HOG array.")
+
+    if not selected_hog_features_ordered:
+        print("  No HOG features were selected for the requested subset indices.")
         return np.empty((0, hog_feature_dim), dtype=np.float32)
 
+    # Stack the selected HOG features into a single NumPy array, already in the requested order
     try:
-        aligned_hog_array = np.vstack(sorted_aligned_hog_list)
+        aligned_hog_array = np.vstack(selected_hog_features_ordered)
+        print(f"  Aligned global HOG shape for requested subset indices: {aligned_hog_array.shape}")
+        return aligned_hog_array
     except ValueError as e:
-         print(f"ERROR: Could not stack aligned HOG features: {e}")
+         print(f"ERROR: Could not stack selected HOG features: {e}")
          return None
-
-    print(f"  Aligned global HOG shape for target set: {aligned_hog_array.shape}")
-    return aligned_hog_array
+    except Exception as e:
+        print(f"Unexpected error stacking selected HOG features: {e}")
+        return None
+    finally:
+        # Clean up the full loaded data
+        del all_hog_features, all_hog_subset_indices
+        gc.collect()
 
 
 # --- 3. DMatrix Creation Function (Updated for Scaling and Weights) ---
-def create_xgb_dmatrix_files(feature_combinations, set_indices, set_labels, is_train_set, output_dir,
-                             sample_weights=None, perform_scaling=False, train_scaler_path=None): # Added scaling params
+def create_xgb_dmatrix_files(feature_combinations, subset_indices_to_load, corresponding_labels, set_type, output_dir,
+                             sample_weights=None, perform_scaling=False, train_scaler_path=None, subset_size_from_map=None, seed_from_map=None): # Added subset_map params
     """
-    Loads features, concatenates, applies scaling (if requested), and saves DMatrix buffer.
+    Loads features by subset indices, concatenates, applies scaling (if requested), and saves DMatrix buffer.
     Can optionally include sample_weights for the training set.
     Handles fitting/saving scaler for train, loading/transforming for test.
+    set_type should be 'train' or 'test'.
     """
-    set_name = "train" if is_train_set else "test"
     feature_desc = "_".join(feature_combinations)
-    # Add suffixes to filenames
-    filename_base = f"{set_name}_{feature_desc}"
-    if is_train_set and sample_weights is not None:
+    # Construct filename based on feature combination and set type
+    filename_base = f"{set_type}_{feature_desc}"
+    if set_type == 'train' and sample_weights is not None:
          filename_base += "_weighted"
     if perform_scaling:
          filename_base += "_scaled"
+    # Add subset size and seed to filename for clarity
+    if subset_size_from_map is not None and seed_from_map is not None:
+        filename_base += f"_subset{subset_size_from_map}_seed{seed_from_map}"
+
 
     dmatrix_filename = os.path.join(output_dir, f"{filename_base}.buffer")
-    scaler_filename = os.path.join(output_dir, f"train_{feature_desc}_scaler.joblib") # Scaler name is specific to train data & features
+    scaler_filename_base = f"train_{feature_desc}"
+    if subset_size_from_map is not None and seed_from_map is not None:
+         scaler_filename_base += f"_subset{subset_size_from_map}_seed{seed_from_map}"
+    scaler_filename = os.path.join(output_dir, f"{scaler_filename_base}_scaler.joblib")
 
-    print(f"\n--- Creating DMatrix for: {feature_desc} ({set_name}) ---")
+
+    print(f"\n--- Creating DMatrix for: {feature_desc} ({set_type}) ---")
     print(f"Target DMatrix file: {dmatrix_filename}")
+    print(f"  Loading/processing {len(subset_indices_to_load)} subset indices.")
 
     if os.path.exists(dmatrix_filename):
         print(f"DMatrix file already exists. Skipping creation.")
         # Check if scaler file also exists if scaling was requested for train
-        if is_train_set and perform_scaling and not os.path.exists(scaler_filename):
+        if set_type == 'train' and perform_scaling and not os.path.exists(scaler_filename):
              print(f"WARNING: DMatrix exists but scaler file {scaler_filename} is missing.")
         return dmatrix_filename
 
-    # --- Load Features ---
+
+    # --- Load Features using the new functions ---
     loaded_features = []
-    target_labels_for_shape_check = set_labels # Use this to verify number of samples loaded
 
     print("Loading features for concatenation...")
     if "sift_spm" in feature_combinations:
-        sift_spm = load_spm_features(BOVW_SPM_FEATURES_DIR, "sift", PYRAMID_LEVELS, set_indices, is_train_set)
-        if sift_spm is None or sift_spm.shape[0] != len(target_labels_for_shape_check):
-             print(f"ERROR: Failed to load or incorrect shape for SIFT SPM features for {set_name}. Expected {len(target_labels_for_shape_check)} samples, got {sift_spm.shape[0] if sift_spm is not None else 'None'}.")
+        sift_spm = load_spm_features_by_subset_indices(BOVW_SPM_FEATURES_DIR, "sift", PYRAMID_LEVELS, requested_subset_indices=subset_indices_to_load, total_subset_size=subset_size_from_map, seed=seed_from_map)
+        if sift_spm is None:
+             print(f"ERROR: Failed to load SIFT SPM features for {set_type}.")
+             return None
+        if sift_spm.shape[0] != len(subset_indices_to_load):
+             print(f"ERROR: Mismatch after loading SIFT SPM features for {set_type}. Expected {len(subset_indices_to_load)}, got {sift_spm.shape[0]}. Alignment issue?")
              return None
         loaded_features.append(sift_spm)
 
     if "orb_spm" in feature_combinations:
-        orb_spm = load_spm_features(BOVW_SPM_FEATURES_DIR, "orb", PYRAMID_LEVELS, set_indices, is_train_set)
-        if orb_spm is None or orb_spm.shape[0] != len(target_labels_for_shape_check):
-             print(f"ERROR: Failed to load or incorrect shape for ORB SPM features for {set_name}. Expected {len(target_labels_for_shape_check)} samples, got {orb_spm.shape[0] if orb_spm is not None else 'None'}.")
+        orb_spm = load_spm_features_by_subset_indices(BOVW_SPM_FEATURES_DIR, "orb", PYRAMID_LEVELS, requested_subset_indices=subset_indices_to_load, total_subset_size=subset_size_from_map, seed=seed_from_map)
+        if orb_spm is None:
+             print(f"ERROR: Failed to load ORB SPM features for {set_type}.")
+             return None
+        if orb_spm.shape[0] != len(subset_indices_to_load):
+             print(f"ERROR: Mismatch after loading ORB SPM features for {set_type}. Expected {len(subset_indices_to_load)}, got {orb_spm.shape[0]}. Alignment issue?")
              return None
         loaded_features.append(orb_spm)
 
     if "hog" in feature_combinations:
-        hog = load_and_align_global_hog(HOG_DATA_FILE, set_indices)
-        # Note: HOG loading already prints its shape and checks against target_indices_for_set size
-        # Additional check if load_and_align_global_hog failed internally
-        if hog is None or hog.shape[0] != len(target_labels_for_shape_check):
-            print(f"ERROR: Failed to load or incorrect shape for HOG features for {set_name}. Expected {len(target_labels_for_shape_check)} samples, got {hog.shape[0] if hog is not None else 'None'}.")
-            return None
+        hog = load_and_align_global_hog_by_subset_indices(HOG_DATA_FILE_SPM, requested_subset_indices=subset_indices_to_load)
+        if hog is None:
+             print(f"ERROR: Failed to load HOG features for {set_type}.")
+             return None
+        if hog.shape[0] != len(subset_indices_to_load):
+             print(f"ERROR: Mismatch after loading HOG features for {set_type}. Expected {len(subset_indices_to_load)}, got {hog.shape[0]}. Alignment issue?")
+             return None
         # Handle potential empty HOG feature dim if all images failed HOG or H5 was empty
         if hog.shape[1] == 0:
-             print("Warning: HOG features have zero dimension. Skipping HOG concatenation.")
+             print("Warning: HOG features have zero dimension after loading/aligning. Skipping HOG concatenation.")
         else:
              loaded_features.append(hog)
 
 
     if not loaded_features:
         print("ERROR: No valid features were specified or loaded for concatenation.")
+        # Clean up any loaded features
+        del loaded_features
+        gc.collect()
         return None
 
     print("Concatenating features...")
     try:
-        # Check if any loaded features are empty (e.g., zero dimension HOG included)
+        # Filter out any loaded features that somehow ended up with zero dimension
         loaded_features = [f for f in loaded_features if f.shape[1] > 0]
         if not loaded_features:
              print("ERROR: All loaded features had zero dimension after filtering. Cannot concatenate.")
+             # Clean up any loaded features
+             del loaded_features
+             gc.collect()
              return None
+
+        # Ensure all features have the same number of samples before concatenating
+        ref_shape = loaded_features[0].shape[0]
+        if not all(f.shape[0] == ref_shape for f in loaded_features):
+            print("ERROR: Mismatched number of samples in features to concatenate:")
+            for i, f in enumerate(loaded_features): print(f"  Feature {i}: {f.shape}")
+            del loaded_features
+            gc.collect()
+            return None # Mismatch critical error
 
         if len(loaded_features) == 1:
             X_combined = loaded_features[0]
         else:
-            # Ensure all features have the same number of samples
-            ref_shape = loaded_features[0].shape[0]
-            if not all(f.shape[0] == ref_shape for f in loaded_features):
-                print("ERROR: Mismatched number of samples in features to concatenate:")
-                for i, f in enumerate(loaded_features): print(f"  Feature {i}: {f.shape}")
-                del loaded_features
-                gc.collect()
-                return None
             X_combined = np.concatenate(loaded_features, axis=1)
 
         print(f"  Combined feature shape: {X_combined.shape}")
-        if X_combined.shape[0] != len(set_labels):
-             print(f"ERROR: Final combined features shape ({X_combined.shape[0]}) doesn't match label count ({len(set_labels)}).")
+        if X_combined.shape[0] != len(corresponding_labels):
+             print(f"CRITICAL ERROR: Final combined features shape ({X_combined.shape[0]}) doesn't match label count ({len(corresponding_labels)}). Alignment is broken!")
              del loaded_features, X_combined
              gc.collect()
-             return None
+             return None # This should ideally not happen if loading/filtering/alignment is correct
 
     except MemoryError:
         print("ERROR: Ran out of memory during feature concatenation.")
         del loaded_features
         if 'X_combined' in locals(): del X_combined
         gc.collect()
-        print("Suggestion: If concatenation fails, consider processing data in smaller chunks or using np.memmap.")
+        print("Suggestion: Reduce subset size or batch size.")
         return None
     except Exception as e:
         print(f"ERROR: Unexpected error during concatenation: {e}")
@@ -365,61 +554,77 @@ def create_xgb_dmatrix_files(feature_combinations, set_indices, set_labels, is_t
         if 'X_combined' in locals(): del X_combined
         gc.collect()
         return None
+    finally:
+         # Ensure individual loaded features are deleted to free memory
+         if 'loaded_features' in locals(): del loaded_features
+         gc.collect()
+
 
     # --- Apply Scaling ---
+    # Scaling happens on the combined feature matrix
     if perform_scaling:
-        print(f"Applying StandardScaler to features for {set_name}...")
+        print(f"Applying StandardScaler to features for {set_type}...")
         try:
-            if is_train_set:
+            if set_type == 'train':
                  scaler = StandardScaler()
                  X_combined_scaled = scaler.fit_transform(X_combined)
                  print(f"  Fitted and transformed training data. Saving scaler to {scaler_filename}")
                  joblib.dump(scaler, scaler_filename)
-            else: # is_test_set
+            else: # set_type == 'test'
                  if train_scaler_path and os.path.exists(train_scaler_path):
                      print(f"  Loading scaler from {train_scaler_path} and transforming test data.")
                      scaler = joblib.load(train_scaler_path)
                      X_combined_scaled = scaler.transform(X_combined)
                  else:
-                     print(f"WARNING: Scaling requested for test set ({set_name}), but train_scaler_path was not provided or file not found: {train_scaler_path}. Skipping scaling for test set.")
+                     print(f"WARNING: Scaling requested for test set ({set_type}), but train_scaler_path was not provided or file not found: {train_scaler_path}. Skipping scaling for test set.")
                      X_combined_scaled = X_combined # Use unscaled data
                      perform_scaling = False # Update flag locally for logging filename
             
             X_combined = X_combined_scaled # Use the scaled data
             print(f"  Scaled feature shape: {X_combined.shape}")
+            if 'scaler' in locals(): del scaler # Clean up scaler object
+            if 'X_combined_scaled' in locals(): del X_combined_scaled # Clean up temp scaled data
+            gc.collect()
 
         except Exception as e:
             print(f"ERROR during scaling: {e}. Proceeding with UNscaled data.")
             # print(traceback.format_exc()) # Optional detailed traceback
             perform_scaling = False # Ensure we don't try to save/use scaled DMatrix suffix
             # X_combined remains unscaled
+            if 'scaler' in locals(): del scaler
+            if 'X_combined_scaled' in locals(): del X_combined_scaled
+            gc.collect()
+
 
     # --- Create and Save DMatrix ---
     print("Creating XGBoost DMatrix...")
     try:
-        # Ensure X_combined is C-contiguous, especially after scaling
+        # Ensure X_combined is C-contiguous, especially after scaling/concatenation
         if not X_combined.flags['C_CONTIGUOUS']:
+             print("Warning: Feature array is not C-contiguous. Converting.")
              X_combined = np.ascontiguousarray(X_combined)
 
         # Pass weights if provided (only for train DMatrix)
-        dmatrix = xgb.DMatrix(X_combined, label=set_labels.astype(np.float32), weight=sample_weights if is_train_set else None)
+        # Labels must be float32 for DMatrix
+        dmatrix = xgb.DMatrix(X_combined, label=corresponding_labels.astype(np.float32), weight=sample_weights if set_type == 'train' else None)
 
         print("Saving DMatrix to buffer file...")
-        # Reconstruct filename base to reflect if scaling actually happened
-        filename_base_final = f"{set_name}_{feature_desc}"
-        if is_train_set and sample_weights is not None:
+        # Reconstruct filename base to reflect if scaling actually happened and include subset info
+        filename_base_final = f"{set_type}_{feature_desc}"
+        if set_type == 'train' and sample_weights is not None:
             filename_base_final += "_weighted"
         if perform_scaling: # Check the *final* state of perform_scaling
             filename_base_final += "_scaled"
+        if subset_size_from_map is not None and seed_from_map is not None:
+            filename_base_final += f"_subset{subset_size_from_map}_seed{seed_from_map}"
+
         dmatrix_filename_final = os.path.join(output_dir, f"{filename_base_final}.buffer")
 
         dmatrix.save_binary(dmatrix_filename_final)
         print(f"Successfully saved DMatrix to {dmatrix_filename_final}")
 
-        del X_combined, loaded_features # Explicit cleanup
-        if 'scaler' in locals(): del scaler
-        if 'X_combined_scaled' in locals(): del X_combined_scaled
-        if 'dmatrix' in locals(): del dmatrix
+        del X_combined # Explicit cleanup of feature array
+        if 'dmatrix' in locals(): del dmatrix # Clean up DMatrix object
         gc.collect()
 
         # Return the final path where the DMatrix was saved
@@ -430,30 +635,33 @@ def create_xgb_dmatrix_files(feature_combinations, set_indices, set_labels, is_t
         # print(traceback.format_exc()) # Optional detailed traceback
         # Clean up any variables that might exist after error
         if 'X_combined' in locals(): del X_combined
-        if 'loaded_features' in locals(): del loaded_features
-        if 'scaler' in locals(): del scaler
-        if 'X_combined_scaled' in locals(): del X_combined_scaled
         if 'dmatrix' in locals(): del dmatrix
         gc.collect()
         return None
 
-# --- 4. Modified Training Functions (Updated for Weights and Scoring) ---
+
+# --- 4. Training Functions (Remains largely the same, uses DMatrix) ---
+# The functions find_best_params_with_gridsearch_on_sample and train_and_evaluate_xgb_dmatrix
+# seem robust already and work with scaled/weighted DMatrices and sample data for tuning.
+# They should not need significant changes, except potentially passing subset size/seed to filename logging.
 
 def find_best_params_with_gridsearch_on_sample(
-    X_train_sample_unscaled, y_train_sample, num_classes, # Now explicitly indicate unscaled input
+    X_train_sample_unscaled, y_train_sample, num_classes,
     base_params, param_grid, cv_folds, feature_type_desc, scoring_metric):
-    """
-    Performs GridSearchCV on a *scaled* sample, attempting GPU first, optimizing for scoring_metric.
-    Includes sample weighting based on sample class distribution.
-    A NEW scaler is fitted and applied *within* this function for the sample.
-    """
+    # ... (This function remains largely the same as in your previous script) ...
+    # Ensure it correctly takes X_train_sample_unscaled, scales it internally,
+    # calculates sample_weights for the sample labels, and passes weights to grid_search.fit.
+    # The current implementation looks good for this purpose.
+
     print(f"\n--- Performing GridSearchCV on SCALED SAMPLE for {feature_type_desc} ---")
-    print(f"Sample size: {X_train_sample_unscaled.shape[0]} ({SAMPLE_FRACTION_FOR_GRIDSEARCH*100:.1f}%)")
+    # Sample fraction info is not available here, assume X_train_sample_unscaled/y_train_sample are already the sample
+    print(f"Sample size: {X_train_sample_unscaled.shape[0]} instances")
     unique_labels_sample, counts_sample = np.unique(y_train_sample, return_counts=True)
     print(f"Unique labels in sample: {unique_labels_sample}")
     print("Sample class distribution:")
     for label, count in zip(unique_labels_sample, counts_sample):
          print(f"  Class {label}: {count} samples")
+
 
     # --- Scale the Sample Data ---
     print("Scaling sample data for GridSearchCV...")
@@ -461,36 +669,33 @@ def find_best_params_with_gridsearch_on_sample(
         scaler_sample = StandardScaler()
         X_train_sample_scaled = scaler_sample.fit_transform(X_train_sample_unscaled)
         print("  Sample data scaled successfully.")
-        # Clean up unscaled data immediately
-        del X_train_sample_unscaled
+        del X_train_sample_unscaled # Clean up unscaled sample data
         gc.collect()
     except Exception as e:
          print(f"ERROR scaling sample data for GridSearchCV: {e}")
          print("Cannot proceed with GridSearchCV.")
-         return None # Exit if scaling fails
+         return None
 
 
     # --- Calculate Sample Weights ---
-    # Use compute_class_weight on the *sample* labels
     try:
          sample_class_weights_dict = compute_class_weight(
              class_weight='balanced',
-             classes=np.arange(num_classes), # Ensure all classes 0..N-1 are included
+             classes=np.arange(num_classes),
              y=y_train_sample
          )
          sample_weights = np.array([sample_class_weights_dict[label] for label in y_train_sample])
          print(f"Calculated sample weights for grid search sample.")
-         # print(f"Sample weights (first 10): {sample_weights[:10]}") # Uncomment to see sample weights
     except Exception as e:
          print(f"ERROR calculating sample weights: {e}")
          print("Cannot proceed with weighted grid search.")
-         del X_train_sample_scaled # Clean up scaled data
+         del X_train_sample_scaled
          gc.collect()
-         return None # Cannot proceed without weights
+         return None
 
     best_params_found = None
     best_score = -1.0
-    used_gpu = False # Track if GPU was successfully used for grid search
+    used_gpu = False
 
     # --- Try GPU First ---
     try:
@@ -502,18 +707,11 @@ def find_best_params_with_gridsearch_on_sample(
         if 'tree_method' not in gpu_params or gpu_params['tree_method'] not in ['hist', 'gpu_hist']:
              gpu_params['tree_method'] = 'hist'
 
-        print(f"Initializing XGBClassifier (GPU) with params: {gpu_params}")
         estimator_gpu = xgb.XGBClassifier(**gpu_params)
-
-        xgb_grid_search_gpu = GridSearchCV(estimator=estimator_gpu,
-                                           param_grid=param_grid,
-                                           scoring=scoring_metric, # Use specified scoring metric
-                                           cv=cv_folds,
-                                           verbose=2,
-                                           n_jobs=1) # Use 1 job for GPU to avoid resource contention
+        xgb_grid_search_gpu = GridSearchCV(estimator=estimator_gpu, param_grid=param_grid,
+                                           scoring=scoring_metric, cv=cv_folds, verbose=2, n_jobs=1)
 
         print(f"Starting GridSearchCV fitting (GPU), optimizing for '{scoring_metric}'...")
-        # Pass SCALED sample data and sample weights to the fit method
         xgb_grid_search_gpu.fit(X_train_sample_scaled, y_train_sample, sample_weight=sample_weights)
 
         print("GridSearchCV with GPU successful.")
@@ -523,14 +721,13 @@ def find_best_params_with_gridsearch_on_sample(
 
     except (xgb.core.XGBoostError, Exception) as gpu_err:
         print(f"\nWARNING: GridSearchCV with GPU failed: {gpu_err}")
-        # print(traceback.format_exc()) # Optional detailed traceback
         print("Falling back to CPU for GridSearchCV.")
         used_gpu = False
         if 'estimator_gpu' in locals(): del estimator_gpu
         if 'xgb_grid_search_gpu' in locals(): del xgb_grid_search_gpu
         gc.collect()
 
-    # --- Fallback to CPU if GPU failed or wasn't tried ---
+    # --- Fallback to CPU ---
     if not used_gpu:
         try:
             print("\nAttempting GridSearchCV with CPU...")
@@ -540,18 +737,11 @@ def find_best_params_with_gridsearch_on_sample(
             if 'device' in cpu_params: del cpu_params['device']
             cpu_params['tree_method'] = 'hist'
 
-            print(f"Initializing XGBClassifier (CPU) with params: {cpu_params}")
             estimator_cpu = xgb.XGBClassifier(**cpu_params)
-
-            xgb_grid_search_cpu = GridSearchCV(estimator=estimator_cpu,
-                                              param_grid=param_grid,
-                                              scoring=scoring_metric, # Use specified scoring metric
-                                              cv=cv_folds,
-                                              verbose=2,
-                                              n_jobs=-1) # Use all available CPU cores
+            xgb_grid_search_cpu = GridSearchCV(estimator=estimator_cpu, param_grid=param_grid,
+                                              scoring=scoring_metric, cv=cv_folds, verbose=2, n_jobs=-1)
 
             print(f"Starting GridSearchCV fitting (CPU), optimizing for '{scoring_metric}'...")
-            # Pass SCALED sample data and sample weights to the fit method
             xgb_grid_search_cpu.fit(X_train_sample_scaled, y_train_sample, sample_weight=sample_weights)
 
             print("GridSearchCV with CPU successful.")
@@ -561,13 +751,11 @@ def find_best_params_with_gridsearch_on_sample(
         except Exception as cpu_err:
             print(f"\nERROR: GridSearchCV with CPU also failed: {cpu_err}")
             print(traceback.format_exc())
-            # Clean up scaled data
             del X_train_sample_scaled
             gc.collect()
             return None
 
-    # --- Combine and Return Best Parameters ---
-    # Clean up scaled data after grid search is done
+    # --- Combine and Return ---
     del X_train_sample_scaled
     gc.collect()
 
@@ -577,16 +765,11 @@ def find_best_params_with_gridsearch_on_sample(
         print(f"  Best parameters found (on sample): {best_params_found}")
         print(f"  Best CV score ({scoring_metric} on sample): {best_score:.4f}")
 
-        # Combine base parameters with the best ones found by the grid search
         final_params = base_params.copy()
         final_params.update(best_params_found)
-        # Add the device parameter back based on which one succeeded in grid search
-        if used_gpu:
-            final_params['device'] = 'cuda'
-        elif 'device' in final_params:
-             del final_params['device'] # Ensure no 'device' if CPU was used
+        if used_gpu: final_params['device'] = 'cuda'
+        elif 'device' in final_params: del final_params['device']
 
-        # Store the actual score metric used in the returned params for logging later
         final_params['_gridsearch_scoring'] = scoring_metric
 
         return final_params
@@ -596,15 +779,16 @@ def find_best_params_with_gridsearch_on_sample(
 
 
 def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
-                                  best_params_from_search, # Params from grid search
+                                  best_params_from_search,
                                   feature_type_desc, target_class_names,
                                   output_results_dir):
-    """Trains final XGBoost model using DMatrix files, respecting device from search."""
-    # Note: The DMatrix files are assumed to be already scaled and weighted as prepared by create_xgb_dmatrix_files
+    # ... (This function remains largely the same, uses DMatrix, saves model, evaluates) ...
+    # It already handles GPU/CPU fallback for the final xgb.train.
+    # Ensure the confusion matrix plotting and results saving include the F1-macro score.
+
     print(f"\n--- Training FINAL XGBoost on FULL data for {feature_type_desc} using DMatrix ---")
     print(f"Train DMatrix: {dtrain_path}")
     print(f"Test DMatrix: {dtest_path}")
-    # print(f"Base parameters from search: {best_params_from_search}") # Don't print full params here, use final_params_used later
 
     if not os.path.exists(dtrain_path) or not os.path.exists(dtest_path):
         print("ERROR: DMatrix train or test file not found. Skipping.")
@@ -612,16 +796,14 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
 
     bst = None
     final_params_used = {}
-    used_gpu_in_final_train = False
     gridsearch_scoring_metric = best_params_from_search.get('_gridsearch_scoring', 'accuracy')
-
 
     try:
         print("Loading DMatrix files...")
         dtrain = xgb.DMatrix(dtrain_path)
         dtest = xgb.DMatrix(dtest_path)
         print("DMatrix files loaded.")
-        dtest.set_label(y_test_labels.astype(np.float32))
+        dtest.set_label(y_test_labels.astype(np.float32)) # Set labels on test DMatrix for evaluation
 
         final_params_to_try = best_params_from_search.copy()
         if '_gridsearch_scoring' in final_params_to_try: del final_params_to_try['_gridsearch_scoring']
@@ -631,44 +813,49 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
         preferred_device = final_params_to_try.get('device', 'cpu')
         actual_device = 'cpu'
 
+        # Add a check to see if any GPUs are visible to XGBoost before attempting CUDA
         if preferred_device == 'cuda':
-             try:
-                 # Check if CUDA is available and working for xgb.train
-                 temp_cpu_params = final_params_to_try.copy()
-                 if 'device' in temp_cpu_params: del temp_cpu_params['device']
-                 test_dmatrix = xgb.DMatrix(np.random.rand(2, dtrain.num_col()), label=np.random.randint(0, NUM_CLASSES, 2))
-                 temp_gpu_model = xgb.train(temp_cpu_params, test_dmatrix, num_boost_round=1, evals=[(test_dmatrix, 'eval')], tree_method='hist', device='cuda')
-                 del temp_gpu_model, test_dmatrix # Clean up test objects
+            try:
+                 # Attempt a small test train on GPU to check availability
+                 # This is more reliable than just checking 'cuda' in device list
+                 temp_params = final_params_to_try.copy()
+                 if 'device' in temp_params: del temp_params['device']
+                 # Ensure temp_dmatrix has consistent columns with dtrain/dtest
+                 temp_dmatrix = xgb.DMatrix(np.random.rand(2, dtrain.num_col()), label=np.random.randint(0, NUM_CLASSES, 2))
+                 print("Testing GPU availability for final training...")
+                 temp_gpu_model = xgb.train(temp_params, temp_dmatrix, num_boost_round=1, evals=[(temp_dmatrix, 'eval')], tree_method='hist', device='cuda')
+                 del temp_gpu_model, temp_dmatrix
                  gc.collect()
                  actual_device = 'cuda'
-                 print(f"\nCUDA device detected and available for final training.")
+                 print(f"CUDA device detected and available for final training.")
 
-             except xgb.core.XGBoostError as e:
+            except xgb.core.XGBoostError as e:
                  print(f"\nWARNING: Preferred GPU training failed ({e}). CUDA device may not be available or configured. Falling back to CPU.")
-                 # print(traceback.format_exc()) # Optional detailed traceback
                  actual_device = 'cpu'
-                 if 'device' in final_params_to_try: del final_params_to_try['device'] # Remove device param for CPU
+                 if 'device' in final_params_to_try: del final_params_to_try['device'] # Ensure no device param for CPU
 
         if actual_device == 'cuda':
              final_params_to_try['device'] = 'cuda'
              if 'tree_method' not in final_params_to_try or final_params_to_try['tree_method'] not in ['hist', 'gpu_hist']:
-                      final_params_to_try['tree_method'] = 'hist'
+                      final_params_to_try['tree_method'] = 'hist' # hist is compatible with CUDA
                       print("Setting tree_method to 'hist' for GPU.")
+             final_params_used = final_params_to_try.copy() # Store the params used
              used_gpu_in_final_train = True
-             final_params_used = final_params_to_try
 
         else: # Use CPU
              if 'device' in final_params_to_try: del final_params_to_try['device']
-             final_params_to_try['tree_method'] = 'hist' # Hist is good for CPU too
+             final_params_to_try['tree_method'] = 'hist' # hist is good for CPU too
+             final_params_used = final_params_to_try.copy() # Store the params used
              used_gpu_in_final_train = False
-             final_params_used = final_params_to_try
 
 
         print(f"Starting final XGBoost training ({actual_device}) with params: {final_params_used}")
         evals = [(dtrain, 'train'), (dtest, 'eval')]
-        num_boost_round = final_params_used.get('n_estimators', 100)
+        num_boost_round = final_params_used.get('n_estimators', 300) # Use n_estimators from best params
+        # Remove n_estimators from the params passed to xgb.train if present
         train_params = final_params_used.copy()
-        if 'n_estimators' in train_params: del train_params['n_estimators'] # n_estimators is for estimators, not xgb.train num_boost_round usually
+        if 'n_estimators' in train_params: del train_params['n_estimators']
+
 
         bst = xgb.train(
             train_params, dtrain, num_boost_round=num_boost_round, evals=evals,
@@ -680,42 +867,67 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
         # --- Evaluation (if training succeeded) ---
         if bst is not None:
             print("\nEvaluating final model on test set...")
-            model_filename = os.path.join(output_results_dir, f'xgb_model_{feature_type_desc.replace(" ", "_").replace("/", "-")}.json')
-            bst.save_model(model_filename)
+            # Model filename should include subset info for clarity
+            model_filename_base = f'xgb_model_{feature_type_desc.replace(" ", "_").replace("/", "-")}'
+            if MAP_SUBSET_SIZE is not None and MAP_RANDOM_SEED is not None:
+                 model_filename_base += f"_subset{MAP_SUBSET_SIZE}_seed{MAP_RANDOM_SEED}"
+            model_filename = os.path.join(output_results_dir, f'{model_filename_base}.json')
+            bst.save_model(model_filename) # Use XGBoost's native save
+            # joblib.dump(bst, model_filename.replace(".json", ".joblib")) # Optional: save with joblib too
             print(f"Saved final XGBoost model ({actual_device}) for {feature_type_desc} to {model_filename}")
 
+
+            # Predict on test set using the best number of iterations found by early stopping
             y_pred_proba = bst.predict(dtest, iteration_range=(0, bst.best_iteration + 1))
             y_pred_labels = np.argmax(y_pred_proba, axis=1)
 
-            # Add check for dimensions if necessary, although DMatrix should handle this
+
+            # Ensure predicted labels match the possible classes
+            # Sometimes models predict outside the range 0..N-1, although less common with softmax objective
+            # predicted_classes_valid = np.clip(y_pred_labels, 0, NUM_CLASSES - 1) # Optional clipping
+
+
             if len(y_test_labels) != len(y_pred_labels):
-                 print(f"ERROR: Mismatch between true test labels ({len(y_test_labels)}) and predicted test labels ({len(y_pred_labels)}). Cannot reliably calculate metrics.")
-                 # Proceed to calculate metrics if shapes match anyway, but note the error.
-                 # This might happen if DMatrix predict output shape is unexpected.
+                 print(f"CRITICAL ERROR: Mismatch between true test labels ({len(y_test_labels)}) and predicted test labels ({len(y_pred_labels)}). Cannot reliably calculate metrics.")
+                 # This indicates a fundamental issue earlier in the pipeline or in DMatrix creation/prediction.
+                 return None # Halt evaluation
 
             accuracy_val = accuracy_score(y_test_labels, y_pred_labels)
-            # Ensure target_names match the actual labels present in y_test_labels and y_pred_labels
-            # Use labels from the original label_encoder for classification_report/confusion_matrix
-            class_report_str = classification_report(y_test_labels, y_pred_labels, target_names=target_class_names, zero_division=0)
-            conf_matrix = confusion_matrix(y_test_labels, y_pred_labels, labels=np.arange(len(target_class_names)))
+            # Ensure target_names match the actual labels present (0..NUM_CLASSES-1)
+            class_report_str = classification_report(y_test_labels, y_pred_labels, target_names=target_class_names, labels=np.arange(NUM_CLASSES), zero_division=0)
+            conf_matrix = confusion_matrix(y_test_labels, y_pred_labels, labels=np.arange(NUM_CLASSES))
             f1_macro_val = f1_score(y_test_labels, y_pred_labels, average='macro', zero_division=0)
-            # Also calculate per-class F1 if needed: f1_scores = f1_score(y_test_labels, y_pred_labels, average=None, labels=np.arange(len(target_class_names)))
 
 
             print(f"Final Model Used Device: {actual_device}")
             print(f"Test Set Accuracy: {accuracy_val:.4f}")
             print(f"Test Set F1-macro: {f1_macro_val:.4f}")
             print(f"Classification Report (XGBoost - {feature_type_desc}):\n{class_report_str}")
-            plot_confusion_matrix(conf_matrix, classes=target_class_names,
-                                  plot_title=f'CM XGB ({actual_device}) {feature_type_desc} (Acc: {accuracy_val:.3f}, F1-M: {f1_macro_val:.3f})',
-                                  results_path=output_results_dir,
-                                  filename=f'cm_xgb_{feature_type_desc.replace(" ", "_").replace("/", "-")}.png')
 
-            results_text_file = os.path.join(output_results_dir, f'results_xgb_{feature_type_desc.replace(" ", "_").replace("/", "-")}.txt')
+            # Plot confusion matrix - include F1-macro in title
+            cm_title = f'CM XGB ({actual_device}) {feature_type_desc} (Acc: {accuracy_val:.3f}, F1-M: {f1_macro_val:.3f})'
+            # Filename for CM plot should also include subset info
+            cm_filename_base = f'cm_xgb_{feature_type_desc.replace(" ", "_").replace("/", "-")}'
+            if MAP_SUBSET_SIZE is not None and MAP_RANDOM_SEED is not None:
+                 cm_filename_base += f"_subset{MAP_SUBSET_SIZE}_seed{MAP_RANDOM_SEED}"
+            cm_filename = f'{cm_filename_base}.png'
+
+            plot_confusion_matrix(conf_matrix, classes=target_class_names,
+                                  plot_title=cm_title,
+                                  results_path=output_results_dir,
+                                  filename=cm_filename)
+
+            # Save results text file - include F1-macro
+            results_text_file_base = f'results_xgb_{feature_type_desc.replace(" ", "_").replace("/", "-")}'
+            if MAP_SUBSET_SIZE is not None and MAP_RANDOM_SEED is not None:
+                 results_text_file_base += f"_subset{MAP_SUBSET_SIZE}_seed{MAP_RANDOM_SEED}"
+            results_text_file = os.path.join(output_results_dir, f'{results_text_file_base}.txt')
+
             with open(results_text_file, 'w') as f:
                 f.write(f"--- XGBoost Results for {feature_type_desc} ---\n")
+                f.write(f"Subset Size: {MAP_SUBSET_SIZE}, Seed: {MAP_RANDOM_SEED}\n")
                 f.write(f"Trained using DMatrix files.\n")
-                f.write(f"GridSearchCV Scoring Metric: {gridsearch_scoring_metric}\n")
+                f.write(f"GridSearchCV Scoring Metric (on Sample): {gridsearch_scoring_metric}\n")
                 f.write(f"Device Used for Final Training: {actual_device}\n")
                 f.write(f"Final Training Parameters Used: {final_params_used}\n")
                 if hasattr(bst, 'best_iteration'):
@@ -729,14 +941,12 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
             print(f"Saved XGBoost results for {feature_type_desc} to {results_text_file}")
 
             # Clean up DMatrix objects *after* all operations
-            del dtrain
-            del dtest
+            del dtrain, dtest
             gc.collect()
 
-            return bst
+            return bst # Return the trained model
         else:
             print("ERROR: Training failed, no model to evaluate.")
-            # Clean up DMatrix objects if they were created
             if 'dtrain' in locals(): del dtrain
             if 'dtest' in locals(): del dtest
             gc.collect()
@@ -745,39 +955,68 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_labels,
     except Exception as e:
         print(f"ERROR: An unexpected error occurred during DMatrix loading/training/evaluation for {feature_type_desc}: {e}")
         print(traceback.format_exc())
-        # Clean up DMatrix objects if they were created
         if 'dtrain' in locals(): del dtrain
         if 'dtest' in locals(): del dtest
         gc.collect()
         return None
 
+
 # --- 5. Main Execution Pipeline ---
 def run_spm_classification_pipeline():
-    print("\n--- Starting SPM Classification Pipeline with DMatrix and Scaling ---")
+    print("\n--- Starting SPM Classification Pipeline with DMatrix, Scaling, and Alignment ---")
 
-    # --- Create Sampled Data Indices and Sample Labels for GridSearchCV ---
-    # If SAMPLE_FRACTION_FOR_GRIDSEARCH is 1, use the full training set for tuning.
-    # This will still require loading the full dataset into memory for GridSearchCV.
-    # If memory is an issue, reduce SAMPLE_FRACTION_FOR_GRIDSEARCH.
+    # --- Step 0: Data Loading and Alignment (Already done at the top) ---
+    # The data (actual_train_subset_indices, y_train, actual_test_subset_indices, y_test)
+    # is loaded and filtered at the beginning of the script using the NPZ and CSV map.
+    # MAP_SUBSET_SIZE and MAP_RANDOM_SEED are also available from the map filename parsing.
+    # These variables are already correctly scoped at the module level before this function.
+
+    # --- Create Sampled Data for GridSearchCV Tuning ---
+    # Sample the *actual* train indices and labels (which are already filtered and aligned)
+    # This sample will be used *only* for GridSearchCV tuning.
     if SAMPLE_FRACTION_FOR_GRIDSEARCH < 1:
-        print(f"\nCreating a {SAMPLE_FRACTION_FOR_GRIDSEARCH*100:.1f}% stratified sample indices for GridSearchCV...")
+        print(f"\nCreating a {SAMPLE_FRACTION_FOR_GRIDSEARCH*100:.1f}% stratified sample indices from the actual train set for GridSearchCV...")
         try:
-            train_indices_sample, _, y_train_sample, _ = train_test_split(
-                train_indices_full, y_train_full,
+            # train_test_split on the actual_train_subset_indices and their corresponding y_train labels
+            train_subset_indices_sample, _, y_train_sample, _ = train_test_split(
+                actual_train_subset_indices, y_train, # Use the filtered actual data here
                 train_size=SAMPLE_FRACTION_FOR_GRIDSEARCH,
-                random_state=42,
-                stratify=y_train_full
+                random_state=42, # Use a consistent random seed for sampling
+                stratify=y_train # Stratify the sample using the actual train labels
             )
-            print(f"Sample size for tuning: {len(train_indices_sample)}")
+            print(f"Sample size for tuning: {len(train_subset_indices_sample)}")
+            # y_train_sample is already a numpy array from train_test_split
+            # train_subset_indices_sample is a list
+
         except ValueError as e:
             print(f"Error during train_test_split for sampling: {e}")
             print("Ensure SAMPLE_FRACTION_FOR_GRIDSEARCH is large enough for stratification.")
             return # Exit pipeline if sampling fails
     else:
-        print("\nUsing the FULL training set for GridSearchCV (SAMPLE_FRACTION_FOR_GRIDSEARCH=1).")
-        train_indices_sample = train_indices_full
-        y_train_sample = y_train_full
-        print(f"Sample size for tuning: {len(train_indices_sample)} (Full set)")
+        print("\nUsing the FULL actual training set for GridSearchCV (SAMPLE_FRACTION_FOR_GRIDSEARCH=1).")
+        train_subset_indices_sample = actual_train_subset_indices # Use the full list of actual train indices
+        y_train_sample = y_train # Use the full actual train labels (numpy array)
+        print(f"Sample size for tuning: {len(train_subset_indices_sample)} (Full set)")
+
+    # --- Calculate Full Training Set Sample Weights (for DMatrix) ---
+    # Calculate these AFTER y_train (the filtered training labels) is finalized.
+    # These weights are for the DMatrix used in the final xgb.train step on the full actual training data.
+    print("\nCalculating full training set sample weights for DMatrix (based on actual train labels)...")
+    try:
+        full_train_class_weights_dict = compute_class_weight(
+            class_weight='balanced',
+            classes=np.arange(NUM_CLASSES),
+            y=y_train # *** Use the filtered y_train labels here ***
+        )
+        # XGBoost DMatrix weight parameter expects a weight for each sample, not per class
+        full_train_sample_weights = np.array([full_train_class_weights_dict[label] for label in y_train]) # *** Use the filtered y_train labels here ***
+        print("Full training set sample weights calculated.")
+        # print(f"Weights: {full_train_class_weights_dict}") # Optional: print weights
+        # print(f"Sample weights (first 10): {full_train_sample_weights[:10]}") # Optional: print sample weights
+    except Exception as e:
+        print(f"ERROR calculating full training set class weights: {e}")
+        print("Cannot proceed.")
+        return # Exit if weight calculation fails
 
 
     # --- Define Feature Combinations to Test ---
@@ -790,24 +1029,6 @@ def run_spm_classification_pipeline():
         f"SPM_SIFT_ORB_L{PYRAMID_LEVELS-1}_HOG": ["sift_spm", "orb_spm", "hog"],
     }
 
-    # --- Calculate Full Training Set Class Weights ---
-    # These weights are for saving with the FULL DMatrix for the final xgb.train step
-    try:
-        full_train_class_weights_dict = compute_class_weight(
-            class_weight='balanced',
-            classes=np.arange(NUM_CLASSES),
-            y=y_train_full
-        )
-        # XGBoost DMatrix weight parameter expects a weight for each sample, not per class
-        full_train_sample_weights = np.array([full_train_class_weights_dict[label] for label in y_train_full])
-        print("\nCalculated full training set sample weights for DMatrix.")
-        # print(f"Weights: {full_train_class_weights_dict}") # Optional: print weights
-        # print(f"Sample weights (first 10): {full_train_sample_weights[:10]}") # Optional: print sample weights
-    except Exception as e:
-        print(f"ERROR calculating full training set class weights: {e}")
-        print("Cannot proceed.")
-        return # Exit if weight calculation fails
-
 
     # --- Loop Through Feature Combinations ---
     all_best_params = {}
@@ -815,39 +1036,41 @@ def run_spm_classification_pipeline():
     for feature_desc, features_to_combine in feature_sets_to_run.items():
         print(f"\n\n{'='*20} Processing Feature Set: {feature_desc} {'='*20}")
 
-        # --- Step 1: Load Sample Data for GridSearchCV Tuning ---
-        # Load the *sample data* into memory for GridSearchCV tuning
-        print(f"\nLoading sample data ({len(train_indices_sample)} instances) into memory for GridSearchCV...")
+        # --- Step 2: Load Sample Data (UNSCALED) for GridSearchCV Tuning ---
+        # Load the features for the SAMPLE indices using the *new* loading functions
+        print(f"\nLoading sample data ({len(train_subset_indices_sample)} instances) into memory for GridSearchCV...")
         sample_features_list_unscaled = []
-        # Use the refined load_spm_features and load_and_align_global_hog, pass sample indices
-        
         sample_loading_success = True
+
         if "sift_spm" in features_to_combine:
-             sift_spm_sample_unscaled = load_spm_features(BOVW_SPM_FEATURES_DIR, "sift", PYRAMID_LEVELS, train_indices_sample, True)
-             if sift_spm_sample_unscaled is not None and sift_spm_sample_unscaled.shape[0]==len(y_train_sample):
+             # Pass the sample subset indices to the new loading function
+             sift_spm_sample_unscaled = load_spm_features_by_subset_indices(BOVW_SPM_FEATURES_DIR, "sift", PYRAMID_LEVELS, requested_subset_indices=train_subset_indices_sample, total_subset_size=MAP_SUBSET_SIZE, seed=MAP_RANDOM_SEED)
+             if sift_spm_sample_unscaled is None or sift_spm_sample_unscaled.shape[0] != len(train_subset_indices_sample):
+                  print("Failed to load/align SIFT for sample gridsearch."); sample_loading_success = False
+             elif sift_spm_sample_unscaled.shape[1] > 0: # Only add if feature dim > 0
                   sample_features_list_unscaled.append(sift_spm_sample_unscaled)
-             else:
-                  print("Failed to load SIFT for sample gridsearch."); sample_loading_success = False
+
         if "orb_spm" in features_to_combine and sample_loading_success:
-             orb_spm_sample_unscaled = load_spm_features(BOVW_SPM_FEATURES_DIR, "orb", PYRAMID_LEVELS, train_indices_sample, True)
-             if orb_spm_sample_unscaled is not None and orb_spm_sample_unscaled.shape[0]==len(y_train_sample):
+             # Pass the sample subset indices to the new loading function
+             orb_spm_sample_unscaled = load_spm_features_by_subset_indices(BOVW_SPM_FEATURES_DIR, "orb", PYRAMID_LEVELS, requested_subset_indices=train_subset_indices_sample, total_subset_size=MAP_SUBSET_SIZE, seed=MAP_RANDOM_SEED)
+             if orb_spm_sample_unscaled is None or orb_spm_sample_unscaled.shape[0] != len(train_subset_indices_sample):
+                  print("Failed to load/align ORB for sample gridsearch."); sample_loading_success = False
+             elif orb_spm_sample_unscaled.shape[1] > 0: # Only add if feature dim > 0
                   sample_features_list_unscaled.append(orb_spm_sample_unscaled)
-             else:
-                  print("Failed to load ORB for sample gridsearch."); sample_loading_success = False
+
+
         if "hog" in features_to_combine and sample_loading_success:
-             hog_sample_unscaled = load_and_align_global_hog(HOG_DATA_FILE, train_indices_sample)
-             if hog_sample_unscaled is not None and hog_sample_unscaled.shape[0]==len(y_train_sample):
-                  # Check HOG dimension; load_and_align already prints warning if dim=0
-                  if hog_sample_unscaled.shape[1] > 0:
-                      sample_features_list_unscaled.append(hog_sample_unscaled)
-                  else:
-                      print("HOG sample features had zero dimension, skipping concatenation for sample.");
-             else:
-                  print("Failed to load HOG for sample gridsearch."); sample_loading_success = False
+             # Pass the sample subset indices to the new HOG loading function
+             hog_sample_unscaled = load_and_align_global_hog_by_subset_indices(HOG_DATA_FILE_SPM, requested_subset_indices=train_subset_indices_sample)
+             if hog_sample_unscaled is None or hog_sample_unscaled.shape[0] != len(train_subset_indices_sample):
+                  print("Failed to load/align HOG for sample gridsearch."); sample_loading_success = False
+             elif hog_sample_unscaled.shape[1] > 0: # Only add if feature dim > 0
+                  sample_features_list_unscaled.append(hog_sample_unscaled)
+
 
         if not sample_loading_success:
-             print(f"Skipping {feature_desc} due to failure loading sample data for GridSearchCV.")
-             # Clean up partial loads if any
+             print(f"Skipping {feature_desc} due to failure loading/aligning sample data for GridSearchCV.")
+             # Clean up partial loads
              if 'sift_spm_sample_unscaled' in locals(): del sift_spm_sample_unscaled
              if 'orb_spm_sample_unscaled' in locals(): del orb_spm_sample_unscaled
              if 'hog_sample_unscaled' in locals(): del hog_sample_unscaled
@@ -855,7 +1078,9 @@ def run_spm_classification_pipeline():
              gc.collect()
              continue
 
+
         # Concatenate sample features for GridSearchCV
+        X_train_sample_combined_unscaled = None
         try:
              if not sample_features_list_unscaled:
                  print("No valid sample features loaded after filtering zero-dim ones. Skipping."); continue
@@ -878,7 +1103,6 @@ def run_spm_classification_pipeline():
         except Exception as e:
              print(f"Error combining sample features: {e}"); continue
         finally:
-             # Clean up individual unscaled sample feature arrays
              if 'sift_spm_sample_unscaled' in locals(): del sift_spm_sample_unscaled
              if 'orb_spm_sample_unscaled' in locals(): del orb_spm_sample_unscaled
              if 'hog_sample_unscaled' in locals(): del hog_sample_unscaled
@@ -886,15 +1110,17 @@ def run_spm_classification_pipeline():
              gc.collect()
 
 
-        # --- Step 2: Perform GridSearchCV on the SCALED SAMPLE ---
-        # The scaling is now handled *inside* find_best_params_with_gridsearch_on_sample
-        best_params = find_best_params_with_gridsearch_on_sample(
-            X_train_sample_combined_unscaled, y_train_sample, NUM_CLASSES,
-            XGB_BASE_PARAMS, PARAM_GRID_XGB, GRIDSEARCH_CV_FOLDS, feature_desc,
-            scoring_metric=GRIDSEARCH_SCORING # Pass the desired scoring metric
-        )
+        # --- Step 3: Perform GridSearchCV on the SCALED SAMPLE ---
+        if X_train_sample_combined_unscaled is not None:
+            best_params = find_best_params_with_gridsearch_on_sample(
+                X_train_sample_combined_unscaled, y_train_sample, NUM_CLASSES,
+                XGB_BASE_PARAMS, PARAM_GRID_XGB, GRIDSEARCH_CV_FOLDS, feature_desc,
+                scoring_metric=GRIDSEARCH_SCORING
+            )
+             # X_train_sample_combined_unscaled is cleaned up inside find_best_params...
+        else:
+            best_params = None # Cannot perform grid search if sample data failed to load/combine
 
-        # X_train_sample_combined_unscaled is cleaned up inside find_best_params...
 
         if best_params is None:
             print(f"GridSearchCV failed for {feature_desc}. Skipping final training.")
@@ -902,48 +1128,62 @@ def run_spm_classification_pipeline():
 
         all_best_params[feature_desc] = best_params
 
-        # --- Step 3: Create DMatrix files for the FULL dataset (Scaled & Weighted) ---
+        # --- Step 4: Create DMatrix files for the FULL dataset (Scaled & Weighted) ---
+        # Use the *actual* train/test subset indices and labels for the full DMatrix
+        print(f"\nCreating DMatrix files for the full training and test sets...")
+
         # Train DMatrix - FIT & TRANSFORM StandardScaler + apply weights + save scaler
-        # The scaler filename is automatically derived and saved inside create_xgb_dmatrix_files
+        # Pass the *filtered* actual train indices (actual_train_subset_indices) and labels (y_train)
+        # and the *filtered* actual sample weights (full_train_sample_weights)
         dtrain_path = create_xgb_dmatrix_files(
-            features_to_combine, train_indices_full, y_train_full, is_train_set=True, output_dir=DMATRIX_CACHE_DIR,
-            sample_weights=full_train_sample_weights, perform_scaling=True
+            features_to_combine, actual_train_subset_indices, y_train, set_type='train', output_dir=DMATRIX_CACHE_DIR,
+            sample_weights=full_train_sample_weights, perform_scaling=True, subset_size_from_map=MAP_SUBSET_SIZE, seed_from_map=MAP_RANDOM_SEED
         )
 
         # Derive the expected path for the scaler that was just saved for the train set
-        # This relies on the consistent naming convention inside create_xgb_dmatrix_files
-        if dtrain_path: # Only proceed if train DMatrix was successfully created
-            train_filename_base = os.path.basename(dtrain_path).replace(".buffer", "")
-            # Remove suffixes like _weighted_scaled to get the base for scaler name
-            train_filename_base_for_scaler = "_".join(train_filename_base.split("_")[1:]).replace("_weighted_scaled", "").replace("_scaled", "").replace("_weighted","")
-            train_scaler_path_for_test = os.path.join(DMATRIX_CACHE_DIR, f"train_{train_filename_base_for_scaler}_scaler.joblib")
+        train_scaler_path_for_test = None
+        if dtrain_path: # Only derive scaler path if train DMatrix was successfully created
+            # Reconstruct filename base for scaler based on train DMatrix name without suffixes
+            train_dmatrix_base_name = os.path.basename(dtrain_path).replace(".buffer", "")
+            scaler_name_parts = train_dmatrix_base_name.split('_')
+            # Remove 'train_' prefix and potential suffixes like '_weighted', '_scaled', subset/seed
+            base_for_scaler = "_".join(scaler_name_parts[1:]) # Everything after 'train_'
+            base_for_scaler = base_for_scaler.replace("_weighted", "").replace("_scaled", "")
+            # If subset/seed were included, remove them from the base before adding back at the end
+            if MAP_SUBSET_SIZE is not None and MAP_RANDOM_SEED is not None:
+                 subset_seed_suffix = f"_subset{MAP_SUBSET_SIZE}_seed{MAP_RANDOM_SEED}"
+                 if base_for_scaler.endswith(subset_seed_suffix):
+                     base_for_scaler = base_for_scaler[:-len(subset_seed_suffix)]
+                 base_for_scaler += subset_seed_suffix # Add it back in the consistent position
+
+            train_scaler_path_for_test = os.path.join(DMATRIX_CACHE_DIR, f"train_{base_for_scaler}_scaler.joblib")
             print(f"Expected train scaler path for test set: {train_scaler_path_for_test}")
 
-            # Test DMatrix - TRANSFORM ONLY using the fitted scaler + NO weights
-            dtest_path = create_xgb_dmatrix_files(
-                features_to_combine, test_indices_full, y_test_full, is_train_set=False, output_dir=DMATRIX_CACHE_DIR,
-                sample_weights=None, perform_scaling=True, train_scaler_path=train_scaler_path_for_test # Pass the fitted scaler path
-            )
-        else:
-             dtest_path = None # Cannot create test DMatrix if train failed
+
+        # Test DMatrix - TRANSFORM ONLY using the fitted scaler + NO weights
+        # Pass the *filtered* actual test indices (actual_test_subset_indices) and labels (y_test)
+        dtest_path = create_xgb_dmatrix_files(
+            features_to_combine, actual_test_subset_indices, y_test, set_type='test', output_dir=DMATRIX_CACHE_DIR,
+            sample_weights=None, perform_scaling=True, train_scaler_path=train_scaler_path_for_test, # Pass the fitted scaler path
+            subset_size_from_map=MAP_SUBSET_SIZE, seed_from_map=MAP_RANDOM_SEED # Pass subset map info
+        )
+
 
         if dtrain_path is None or dtest_path is None:
             print(f"Skipping final training for {feature_desc} due to DMatrix creation failure.")
             continue
 
-        # --- Step 4: Train final model on FULL data using DMatrix ---
-        # The DMatrix files created in Step 3 are already scaled and weighted.
-        # train_and_evaluate_xgb_dmatrix doesn't need to handle scaling/weighting directly.
+        # --- Step 5: Train final model on FULL data using DMatrix ---
+        # The DMatrix files created in Step 4 are already scaled and weighted.
         train_and_evaluate_xgb_dmatrix(
-            dtrain_path, dtest_path, y_test_full, # Pass full test labels
-            best_params, # Use the params found by grid search (includes device hint)
+            dtrain_path, dtest_path, y_test, # Pass the actual test labels (y_test)
+            best_params, # Use the params found by grid search
             feature_desc, class_names, RESULTS_DIR_XGB_SPM
         )
 
     print("\n--- SPM Classification Pipeline Complete ---")
     print("Best parameters found (from sample grid search):")
     for name, params in all_best_params.items():
-        # Remove the internal _gridsearch_scoring key for cleaner output
         display_params = params.copy()
         if '_gridsearch_scoring' in display_params: del display_params['_gridsearch_scoring']
         print(f"  {name}: {display_params}")

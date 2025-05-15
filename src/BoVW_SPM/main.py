@@ -17,19 +17,19 @@ def main():
     print("Starting the Image Classification Pipeline...")
 
     # Step 1: Get the data
-    #download_dataset()
+    download_dataset()
 
     # Step 2: Extract features
-    #SOH_extract_SPM()
+    SOH_extract_SPM()
     
     # Step 3: Build Vocabulary with KMeans
-    #build_all_spm_vocabularies()
+    build_all_spm_vocabularies()
     
     # Step 4: Split data into the 4 categories
-    #split_data()
+    split_data()
     
     # Step 5: Build Histograms for each image
-    #histogram_creation_SPM()
+    histogram_creation_SPM()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
     run_spm_classification_pipeline()

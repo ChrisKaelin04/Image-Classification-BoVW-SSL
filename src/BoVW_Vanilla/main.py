@@ -23,16 +23,16 @@ def main():
     SOH_extract()
     
     # Step 3: Build Vocabulary with KMeans
-    build_vocab_KMeans()
+    #build_vocab_KMeans()
     
     # Step 4: Split data into the 4 categories
-    split_data()
+    #split_data()
     
     # Step 5: Build Histograms for each image
-    histogram_creation()
+    #histogram_creation()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
-    test()
+    #test()
 
     print("Pipeline completed successfully!")
 
