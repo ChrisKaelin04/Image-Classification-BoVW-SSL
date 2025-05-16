@@ -71,7 +71,7 @@ def _build_single_feature_type_vocabulary(
                 list_of_descriptor_arrays_in_batch = pickle.load(f)
             if not list_of_descriptor_arrays_in_batch: continue
 
-            valid_descriptors = [d for d in list_of_descriptor_arrays_in_batch if d is not None and d.shape[0] > 0]
+            valid_descriptors = [d for (d, x) in list_of_descriptor_arrays_in_batch if d is not None and d.shape[0] > 0]
             if not valid_descriptors: continue
             
             current_batch_np = np.vstack(valid_descriptors)

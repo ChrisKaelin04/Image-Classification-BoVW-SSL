@@ -21,13 +21,13 @@ def main():
     #create_balanced_split_for_bovw()
 
     # Step 2: Extract features
-    SOH_extract()
+    #SOH_extract()
     
     # Step 3: Build Vocabulary with KMeans
-    build_all_vanilla_bovw_vocabularies()
+    #build_all_vanilla_bovw_vocabularies()
     
     # Step 5: Build Histograms for each image
-    main_histogram_creation_vanilla_balanced()
+    #main_histogram_creation_vanilla_balanced()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
     test()

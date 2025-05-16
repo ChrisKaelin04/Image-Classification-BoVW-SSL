@@ -26,7 +26,7 @@ def main():
     #build_all_spm_vocabularies_balanced()
     
     # Step 4: Build Histograms for each image
-    #main_histogram_creation_spm_balanced()
+    main_histogram_creation_spm_balanced()
     
     # Step 5: Train and evaluate the model. If its better than 0.25 accuracy great success
     run_spm_classification_pipeline()

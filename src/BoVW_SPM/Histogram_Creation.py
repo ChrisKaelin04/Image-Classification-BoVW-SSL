@@ -18,7 +18,7 @@ FEATURES_SPM_BALANCED_DIR = r"E:\CV_features_SPM_balanced"
 VOCAB_DIR_SPM_BALANCED = FEATURES_SPM_BALANCED_DIR
 
 VOCAB_SIZE = 1000  # Must match K used for vocabulary building
-PYRAMID_LEVELS = 2 # L=2 gives levels 0 and 1 (1x1, 2x2 grids) -> 1+4=5 regions.
+PYRAMID_LEVELS = 3 # L=2 gives levels 0 and 1 (1x1, 2x2 grids) -> 1+4=5 regions.
 
 # Output directory for the final SPM histograms
 SPM_HISTOGRAMS_OUTPUT_DIR = os.path.join(FEATURES_SPM_BALANCED_DIR, f"spm_histograms_L{PYRAMID_LEVELS-1}_k{VOCAB_SIZE}")

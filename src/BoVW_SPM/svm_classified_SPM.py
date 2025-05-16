@@ -20,7 +20,7 @@ import gc
 
 # Directory where histogram_creation_SPM_balanced.py saved the final .npy feature/label files
 # This is for SIFT and ORB SPM histograms
-SPM_HISTOGRAMS_DIR = r"E:\CV_features_SPM_balanced\spm_histograms_L1_k1000" # Adjust L and K if different
+SPM_HISTOGRAMS_DIR = r"E:\CV_features_SPM_balanced\spm_histograms_L2_k1000" # Adjust L and K if different
 # Example path: E:\CV_features_SPM_balanced\spm_histograms_L1_k1000 (assuming PYRAMID_LEVELS=2, VOCAB_SIZE=1000)
 
 # Directory containing the HOG feature and label batches (.npy files)
@@ -53,7 +53,7 @@ os.makedirs(DMATRIX_CACHE_DIR_BALANCED, exist_ok=True)
 
 # These must match what was used in histogram_creation_SPM_balanced.py to find the .npy files
 VOCAB_SIZE_FOR_LOADING = 1000
-PYRAMID_LEVELS_FOR_LOADING = 2 # L value used in filenames (e.g., L1 if PYRAMID_LEVELS=2)
+PYRAMID_LEVELS_FOR_LOADING = 3 # L value used in filenames (e.g., L1 if PYRAMID_LEVELS=2)
 MAX_LEVEL_INDEX_FOR_LOADING = PYRAMID_LEVELS_FOR_LOADING - 1
 
 
