@@ -1,0 +1,24 @@
+--- XGBoost Results for SPM_SIFT_L1 ---
+GridSearchCV Best Params (from sample): {'objective': 'multi:softprob', 'eval_metric': 'mlogloss', 'tree_method': 'hist', 'random_state': 42, 'use_label_encoder': False, 'num_class': 4, 'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 300, '_gridsearch_scoring': 'f1_macro', 'device': 'cuda'}
+Final Training Device: cpu
+Test Accuracy: 0.6002
+Test F1-macro: 0.5953
+
+Report:
+                          precision    recall  f1-score   support
+
+Indoor Public/Commercial       0.54      0.52      0.53      5000
+      Indoor Residential       0.59      0.63      0.60      5000
+         Outdoor Natural       0.71      0.80      0.75      4998
+           Outdoor Urban       0.54      0.46      0.50      5000
+
+                accuracy                           0.60     19998
+               macro avg       0.59      0.60      0.60     19998
+            weighted avg       0.59      0.60      0.60     19998
+
+
+CM:
+[[2582 1373  298  747]
+ [1174 3131  221  474]
+ [ 158  144 3997  699]
+ [ 869  704 1134 2293]]
