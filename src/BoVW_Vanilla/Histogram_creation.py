@@ -1,161 +1,185 @@
-# This file is the third part of the BoVWs pipeline. We already extracted the features and created the vocabulary. Now we will create the histograms for each image using the vocabulary we just created.
+# histogram_creation_vanilla_balanced.py
 import numpy as np
 import os
 import glob
 import pickle
-import joblib # For loading KMeans models and for Parallel
+import joblib
 from tqdm import tqdm
 from sklearn.preprocessing import normalize
 from joblib import Parallel, delayed
+import gc
 
-FEATURES_DIR = "E:\CV_features"
-SPLITS_DIR = os.path.join(FEATURES_DIR, "train_test_splits_4cat_revised")
-NPZ_FILE = os.path.join(SPLITS_DIR, "train_test_split_data_4cat_revised.npz")
-LABEL_ENCODER_FILE = os.path.join(SPLITS_DIR, "broad_label_encoder_4cat_revised.pkl")
+# --- Configuration for Vanilla BoVW Histograms from BALANCED Data ---
 
-VOCAB_SIZE = 1000 # Must match our K for Kmeans
+# Input: Directory where SOH_extract_vanilla_balanced.py saved SIFT/ORB descriptor batches
+# This is the parent directory of 'sift_descriptors_batches' and 'orb_descriptors_batches'
+VANILLA_FEATURES_RAW_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features"
 
-BOVW_FEATURES_DIR = os.path.join(FEATURES_DIR, "bovw_features_4cat")
-os.makedirs(BOVW_FEATURES_DIR, exist_ok=True)
+# Directory where build_vocabulary_vanilla_balanced.py saved KMeans models
+# (Often the same as VANILLA_FEATURES_RAW_DIR)
+VOCAB_MODELS_DIR = VANILLA_FEATURES_RAW_DIR
 
-def generate_bovw_histogram(image_descriptors, kmeans_model, vocab_size):
-    if image_descriptors is None or image_descriptors.shape[0] == 0:
+VOCAB_SIZE = 1000  # Must match K used for vocabulary building
+
+# Output directory for the final Vanilla BoVW histograms and their labels
+HISTOGRAMS_OUTPUT_DIR = os.path.join(VANILLA_FEATURES_RAW_DIR, f"bovw_histograms_k{VOCAB_SIZE}")
+os.makedirs(HISTOGRAMS_OUTPUT_DIR, exist_ok=True)
+
+N_JOBS_PARALLEL = os.cpu_count() - 2 if os.cpu_count() > 2 else 1 # For parallel processing
+
+
+def generate_bovw_histogram(image_descriptors_single_image, kmeans_model, vocab_size):
+    """
+    Generates a BoVW histogram for a single image's descriptors.
+    """
+    if image_descriptors_single_image is None or image_descriptors_single_image.shape[0] == 0:
         return np.zeros(vocab_size, dtype=np.float32)
     
-    if image_descriptors.dtype == np.uint8: # ORB descriptors are uint8
-        image_descriptors = image_descriptors.astype(np.float32)
+    # Ensure descriptors are float32 for KMeans prediction
+    descriptors_float = image_descriptors_single_image.astype(np.float32) if image_descriptors_single_image.dtype != np.float32 else image_descriptors_single_image
     
-    visual_words = kmeans_model.predict(image_descriptors)
-    histogram = np.bincount(visual_words, minlength=vocab_size).astype(np.float32)
-    
+    try:
+        visual_words = kmeans_model.predict(descriptors_float)
+        histogram = np.bincount(visual_words, minlength=vocab_size).astype(np.float32)
+    except Exception as e:
+        # This might happen if a descriptor array is malformed or has unexpected dimensions
+        # For safety, return a zero histogram. Log the error.
+        # tqdm.write(f"Error during kmeans.predict or bincount: {e}. Desc shape: {descriptors_float.shape}. Returning zeros.")
+        return np.zeros(vocab_size, dtype=np.float32)
+
+    # L2 Normalize the histogram (common practice for BoVW)
     if np.sum(histogram) > 0:
         histogram = normalize(histogram.reshape(1, -1), norm='l2')[0]
     
     return histogram
 
-# Helper function for parallel processing of a single image's BoVW
-def _generate_single_bovw_for_parallel(image_idx, processed_indices_map, kmeans_model, vocab_size):
-    """
-    Generates BoVW for a single image_idx.
-    This function will be called by each parallel worker.
-    It handles its own batch loading for the given image_idx.
-    """
-    descriptors = None
-    if image_idx in processed_indices_map:
-        target_batch_file = processed_indices_map[image_idx]
-        try:
-            with open(target_batch_file, 'rb') as f:
-                batch_descriptors_data = pickle.load(f)
-            descriptors = batch_descriptors_data.get(image_idx)
-        except Exception as e:
-            print(f"Error loading batch file {target_batch_file} for index {image_idx} in worker: {e}")
-            # Fall through, descriptors will be None, and a zero histogram will be returned
+def _process_descriptor_label_tuple_for_hist(descriptor_label_tuple, kmeans_model, vocab_size):
+    """Helper for joblib.Parallel. Processes one (descriptors, label) tuple."""
+    descriptors_for_image, label_for_image = descriptor_label_tuple
+    hist = generate_bovw_histogram(descriptors_for_image, kmeans_model, vocab_size)
+    return hist, label_for_image
 
-    hist = generate_bovw_histogram(descriptors, kmeans_model, vocab_size)
-    return hist
 
-def process_indices_bovw_parallel(indices, descriptor_batches_dir, feature_type, kmeans_model, vocab_size, desc="Processing Images", n_jobs=-1):
-    processed_indices_map = {} # This map is built once and passed to workers
-    batch_files = sorted(glob.glob(os.path.join(FEATURES_DIR, descriptor_batches_dir, f'{feature_type}_batch_*.pkl')))
-    
-    if not batch_files:
-        print(f"Error: No batch files found for {feature_type} in {os.path.join(FEATURES_DIR, descriptor_batches_dir)}")
-        return np.array([])
-    
-    print(f"Mapping indices from {len(batch_files)} batch files for {feature_type}...")
-    # Build the map of image_idx to its batch file path
-    for batch_file_path in tqdm(batch_files, desc=f"Scanning {feature_type} batches for mapping"):
+def create_histograms_for_set_and_feature_type(
+    feature_type,
+    set_name, # 'train' or 'test'
+    kmeans_model_loaded,
+    vocab_size_param
+):
+    """
+    Loads descriptor batches for a given feature type and set,
+    generates BoVW histograms in parallel, and returns them along with labels.
+    """
+    print(f"\n--- Creating Vanilla BoVW Histograms for {feature_type.upper()} - {set_name.upper()} SET ---")
+
+    descriptor_batches_subdir_name = f'{feature_type}_descriptors_batches'
+    input_descriptor_batches_path = os.path.join(VANILLA_FEATURES_RAW_DIR, descriptor_batches_subdir_name)
+
+    # Glob pattern for the descriptor batch files for this feature_type and set_name
+    batch_files_pattern = os.path.join(input_descriptor_batches_path, f'{feature_type}_descriptors_{set_name}_batch_*.pkl')
+    descriptor_batch_files = sorted(glob.glob(batch_files_pattern))
+
+    if not descriptor_batch_files:
+        print(f"Error: No {set_name.upper()} descriptor batch files found for {feature_type.upper()} in {input_descriptor_batches_path}")
+        print(f"Searched for pattern: '{batch_files_pattern}'")
+        return None, None # Return None for both histograms and labels
+
+    print(f"Found {len(descriptor_batch_files)} {set_name.upper()} descriptor batch files for {feature_type.upper()}.")
+
+    # Collect all (descriptors_for_one_image, label_for_that_image) tuples from all batch files
+    all_descriptor_label_tuples_for_set = []
+    for batch_file_path in tqdm(descriptor_batch_files, desc=f"Loading {set_name} {feature_type} descriptor batches"):
         try:
             with open(batch_file_path, 'rb') as f:
-                batch_data = pickle.load(f)
-            for idx_in_batch in batch_data.keys():
-                processed_indices_map[idx_in_batch] = batch_file_path
+                # Each PKL file now contains a LIST of (descriptor_array, label) tuples
+                list_of_desc_label_tuples = pickle.load(f)
+                all_descriptor_label_tuples_for_set.extend(list_of_desc_label_tuples)
         except Exception as e:
-            print(f"Warning: Could not load or process {batch_file_path} during mapping: {e}")
+            tqdm.write(f"Warning: Could not load or process batch file {batch_file_path}: {e}. Skipping.")
             continue
-    print(f"Mapped {len(processed_indices_map)} unique descriptor sets for {feature_type}.")
-
-    if not processed_indices_map:
-        print(f"No descriptors found for {feature_type}. Returning empty array.")
-        return np.array([])
-        
-    print(f"\nGenerating BoVW histograms for {len(indices)} images ({feature_type}) using {n_jobs if n_jobs != -1 else os.cpu_count()} workers...")
     
-    # Use joblib.Parallel to process images
-    # `prefer="threads"` might be good if I/O is the bottleneck and GIL is released by pickle/numpy
-    # `prefer="processes"` (default) is better if CPU-bound (like predict) and avoids GIL issues
-    # For predict, processes is generally better.
-    histograms_list = Parallel(n_jobs=n_jobs)(
-        delayed(_generate_single_bovw_for_parallel)(
-            image_idx, processed_indices_map, kmeans_model, vocab_size
-        ) for image_idx in tqdm(indices, desc=desc)
+    if not all_descriptor_label_tuples_for_set:
+        print(f"No descriptor-label tuples loaded from batches for {feature_type.upper()} {set_name.upper()} set.")
+        return None, None
+
+    print(f"Collected {len(all_descriptor_label_tuples_for_set)} descriptor-label items for {feature_type.upper()} {set_name.upper()} set.")
+    
+    # Generate histograms in parallel
+    # Input to delayed: (descriptor_label_tuple, kmeans_model, vocab_size)
+    # Output from parallel call: list of (histogram, label) tuples
+    results_hist_label_list = Parallel(n_jobs=N_JOBS_PARALLEL)(
+        delayed(_process_descriptor_label_tuple_for_hist)(
+            desc_label_tuple, kmeans_model_loaded, vocab_size_param
+        ) for desc_label_tuple in tqdm(all_descriptor_label_tuples_for_set, desc=f"Building {set_name} {feature_type} BoVW hists")
     )
     
-    return np.array(histograms_list)
+    if not results_hist_label_list:
+        print(f"No histograms generated for {feature_type.upper()} {set_name.upper()} set.")
+        return None, None
 
-def histogram_creation():
-    print("--- Starting BoVW Histogram Generation ---")
+    # Separate histograms and labels
+    # The order is preserved from all_descriptor_label_tuples_for_set by joblib.Parallel by default
+    histograms_array = np.array([item[0] for item in results_hist_label_list if item is not None])
+    labels_array = np.array([item[1] for item in results_hist_label_list if item is not None], dtype=np.int8)
 
-    print(f"Loading train/test split data from: {NPZ_FILE}")
-    split_data = np.load(NPZ_FILE)
-    train_indices = split_data['train_indices']
-    test_indices = split_data['test_indices']
+    if histograms_array.size == 0 or labels_array.size == 0 or histograms_array.shape[0] != labels_array.shape[0]:
+        print(f"Error: Mismatch or empty results after parallel processing for {feature_type.upper()} {set_name.upper()} set.")
+        return None, None
+        
+    print(f"Generated BoVW histograms for {feature_type.upper()} {set_name.upper()} set. Shape: {histograms_array.shape}")
+    print(f"Corresponding labels shape: {labels_array.shape}")
+    
+    return histograms_array, labels_array
 
-    print(f"Loaded {len(train_indices)} training and {len(test_indices)} testing indices.")
 
-    N_JOBS = os.cpu_count() - 4
+def main_histogram_creation_vanilla_balanced():
+    print("--- Starting Vanilla BoVW Histogram Generation (from Balanced Data) ---")
 
-    print("\n--- Processing SIFT Features ---")
-    sift_kmeans_model_file = os.path.join(FEATURES_DIR, 'sift_kmeans_model_k1000_partial_fit.joblib')
-    sift_batches_subdir = 'sift_batches'
+    feature_types_to_process = ['sift', 'orb']
+    data_sets_to_process = ['train', 'test']
 
-    if os.path.exists(sift_kmeans_model_file):
-        print(f"Loading SIFT KMeans model from: {sift_kmeans_model_file}")
-        sift_kmeans = joblib.load(sift_kmeans_model_file)
+    for ft_type in feature_types_to_process:
+        # Load the corresponding KMeans model (trained only on training data)
+        kmeans_model_filename = f'{ft_type}_vanilla_balanced_k{VOCAB_SIZE}_train_kmeans_model.joblib'
+        kmeans_model_path = os.path.join(VOCAB_MODELS_DIR, kmeans_model_filename)
 
-        X_train_sift_bovw = process_indices_bovw_parallel(
-            train_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Train BoVW", n_jobs=N_JOBS
-        )
-        print(f"SIFT Training BoVW histograms shape: {X_train_sift_bovw.shape}")
-        if X_train_sift_bovw.size > 0:
-            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_sift_bovw.npy'), X_train_sift_bovw)
-            print(f"Saved SIFT training BoVW features to {BOVW_FEATURES_DIR}")
+        if not os.path.exists(kmeans_model_path):
+            print(f"ERROR: KMeans model for {ft_type.upper()} not found at {kmeans_model_path}.")
+            print(f"Please run 'build_vocabulary_vanilla_balanced.py' first for {ft_type}.")
+            continue # Skip this feature type
+        
+        print(f"\nLoading {ft_type.upper()} KMeans model from: {kmeans_model_path}")
+        try:
+            kmeans_model = joblib.load(kmeans_model_path)
+        except Exception as e:
+            print(f"ERROR loading {ft_type.upper()} KMeans model: {e}. Skipping this feature type.")
+            continue
 
-        X_test_sift_bovw = process_indices_bovw_parallel(
-            test_indices, sift_batches_subdir, 'sift', sift_kmeans, VOCAB_SIZE, desc="SIFT Test BoVW", n_jobs=N_JOBS
-        )
-        print(f"SIFT Test BoVW histograms shape: {X_test_sift_bovw.shape}")
-        if X_test_sift_bovw.size > 0:
-            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_sift_bovw.npy'), X_test_sift_bovw)
-            print(f"Saved SIFT test BoVW features to {BOVW_FEATURES_DIR}")
-    else:
-        print(f"SIFT KMeans model not found at {sift_kmeans_model_file}. Skipping SIFT BoVW generation.")
+        for set_name in data_sets_to_process:
+            X_bovw_histograms, y_bovw_labels = create_histograms_for_set_and_feature_type(
+                feature_type=ft_type,
+                set_name=set_name,
+                kmeans_model_loaded=kmeans_model,
+                vocab_size_param=VOCAB_SIZE
+            )
 
-    print("\n--- Processing ORB Features ---")
-    orb_kmeans_model_file = os.path.join(FEATURES_DIR, 'orb_kmeans_model_k1000_partial_fit.joblib')
-    orb_batches_subdir = 'orb_batches'
+            if X_bovw_histograms is not None and y_bovw_labels is not None:
+                # Save the histograms and labels
+                hist_output_filename = f"X_{set_name}_{ft_type}_vanilla_k{VOCAB_SIZE}.npy"
+                labels_output_filename = f"y_{set_name}_{ft_type}_vanilla_labels_k{VOCAB_SIZE}.npy" # Changed to match SPM
 
-    if os.path.exists(orb_kmeans_model_file):
-        print(f"Loading ORB KMeans model from: {orb_kmeans_model_file}")
-        orb_kmeans = joblib.load(orb_kmeans_model_file)
+                np.save(os.path.join(HISTOGRAMS_OUTPUT_DIR, hist_output_filename), X_bovw_histograms)
+                np.save(os.path.join(HISTOGRAMS_OUTPUT_DIR, labels_output_filename), y_bovw_labels)
+                
+                print(f"Saved {set_name} {ft_type.upper()} Vanilla BoVW histograms to: {hist_output_filename}")
+                print(f"Saved {set_name} {ft_type.upper()} Vanilla BoVW labels to: {labels_output_filename}")
+            else:
+                print(f"Failed to generate histograms or labels for {ft_type.upper()} {set_name.upper()} set.")
+            
+            del X_bovw_histograms, y_bovw_labels # Explicit cleanup
+            gc.collect()
+        del kmeans_model # Cleanup model after processing train/test for this feature type
+        gc.collect()
 
-        X_train_orb_bovw = process_indices_bovw_parallel(
-            train_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Train BoVW", n_jobs=N_JOBS
-        )
-        print(f"ORB Training BoVW histograms shape: {X_train_orb_bovw.shape}")
-        if X_train_orb_bovw.size > 0:
-            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_train_orb_bovw.npy'), X_train_orb_bovw)
-            print(f"Saved ORB training BoVW features to {BOVW_FEATURES_DIR}")
-
-        X_test_orb_bovw = process_indices_bovw_parallel(
-            test_indices, orb_batches_subdir, 'orb', orb_kmeans, VOCAB_SIZE, desc="ORB Test BoVW", n_jobs=N_JOBS
-        )
-        print(f"ORB Test BoVW histograms shape: {X_test_orb_bovw.shape}")
-        if X_test_orb_bovw.size > 0:
-            np.save(os.path.join(BOVW_FEATURES_DIR, 'X_test_orb_bovw.npy'), X_test_orb_bovw)
-            print(f"Saved ORB test BoVW features to {BOVW_FEATURES_DIR}")
-    else:
-        print(f"ORB KMeans model not found at {orb_kmeans_model_file}. Skipping ORB BoVW generation.")
-
-    print("\n--- Phase 2: BoVW Histogram Generation Complete ---")
-    print(f"BoVW features saved in: {BOVW_FEATURES_DIR}")
+    print("\n--- All Vanilla BoVW Histogram Generation (Balanced Data) Complete ---")
+    print(f"Final BoVW histograms and labels saved in: {HISTOGRAMS_OUTPUT_DIR}")

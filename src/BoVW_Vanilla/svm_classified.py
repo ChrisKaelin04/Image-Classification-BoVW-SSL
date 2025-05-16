@@ -1,80 +1,71 @@
+# Vanilla_BoVW_SOH_XGBoost_Classification_balanced.py
 import numpy as np
 import os
 import pickle
 import warnings
 import joblib
-import h5py # For loading HOG data
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.model_selection import GridSearchCV
-from sklearn.preprocessing import StandardScaler # SVMs often benefit more from scaling than tree models
+import h5py # For loading HOG data if still used from an older HDF5 source
+import glob # For finding label encoder
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
+from sklearn.model_selection import GridSearchCV, train_test_split # train_test_split for GS sample
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight # Correct import
 import matplotlib.pyplot as plt
 import seaborn as sns
-import xgboost as xgb # XGBoost import
+import xgboost as xgb
+import traceback
+import gc
 
-# --- Configuration ---
-FEATURES_DIR = "E:\CV_features"
-SPLITS_DIR = os.path.join(FEATURES_DIR, "train_test_splits_4cat_revised")
-NPZ_FILE = os.path.join(SPLITS_DIR, "train_test_split_data_4cat_revised.npz")
-LABEL_ENCODER_FILE = os.path.join(SPLITS_DIR, "broad_label_encoder_4cat_revised.pkl")
-warnings.filterwarnings("ignore", message="Parameters: {.*use_label_encoder.*} are not used.", category=UserWarning, module="xgboost.core")
-BOVW_FEATURES_DIR = os.path.join(FEATURES_DIR, "bovw_features_4cat")
-HOG_DATA_FILE = os.path.join(FEATURES_DIR, 'hog_data.h5')
+# --- Configuration for BALANCED Vanilla BoVW Classification ---
 
-RESULTS_DIR_SVM = os.path.join(FEATURES_DIR, "classification_results_SVM_SOH_4cat")
-RESULTS_DIR_XGB = os.path.join(FEATURES_DIR, "classification_results_XGB_SOH_4cat") # Separate results for XGB
-os.makedirs(RESULTS_DIR_SVM, exist_ok=True)
-os.makedirs(RESULTS_DIR_XGB, exist_ok=True)
+# Directory where histogram_creation_vanilla_balanced.py saved .npy histograms and labels
+NORMAL_BOVW_HISTOGRAMS_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features\bovw_histograms_k1000" # Ensure K matches
 
-VOCAB_SIZE = 1000 # Used for naming SIFT/ORB features if convention includes it
-split_data = None
+# Directory where SOH_extract_vanilla_balanced.py saved HOG HDF5 files (if using these HOGs)
+# Or, if HOG features are bundled with SPM's balanced HOG, point there.
+HOG_FEATURES_BALANCED_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features" # Dir containing hog_data_train_balanced.h5 etc.
 
-# Determine which SVM implementation to use (CPU sklearn or placeholder for GPU)
-# For this version, we'll focus on sklearn SVC (CPU) and add XGBoost (GPU)
-# If you had ThunderSVM or cuML successfully installed, you'd manage SVM_IMPLEMENTATION here.
-# For now, to avoid errors if ThunderSVM isn't built:
-from sklearn.svm import SVC as SklearnSVC
-SVM_IMPLEMENTATION = SklearnSVC
-print(f"Using SVM implementation: {SVM_IMPLEMENTATION.__name__}")
+# Label encoder file from the BALANCED splitting script (create_balanced_split_for_bovw.py)
+BALANCED_SPLITS_INFO_DIR = r"E:\CV_features\bovw_splits_balanced"
+LABEL_ENCODER_FILE_PATTERN = os.path.join(BALANCED_SPLITS_INFO_DIR, "bovw_label_encoder_N*_S*.pkl")
+
+# Results directory
+RESULTS_DIR_XGB_VANILLA_BALANCED = r"E:\CV_BoVW_Vanilla_Balanced\classification_results_XGB_SOH_balanced"
+os.makedirs(RESULTS_DIR_XGB_VANILLA_BALANCED, exist_ok=True)
+
+# DMatrix cache (can be specific to this pipeline)
+DMATRIX_CACHE_DIR_VANILLA_BALANCED = os.path.join(r"E:\CV_BoVW_Vanilla_Balanced", "xgb_dmatrix_cache_SOH_balanced")
+os.makedirs(DMATRIX_CACHE_DIR_VANILLA_BALANCED, exist_ok=True)
+
+# K value used in histogram filenames
+VOCAB_SIZE_FOR_LOADING = 1000
+
+# --- XGBoost Hyperparameters (Keep these moderate for your hardware) ---
+XGB_BASE_PARAMS = {
+    'objective': 'multi:softprob',
+    'eval_metric': 'mlogloss',
+    'tree_method': 'hist',
+    'random_state': 42,
+    'use_label_encoder': False
+}
+PARAM_GRID_XGB = { # Smaller grid for faster runs, expand if needed
+    'n_estimators': [200, 300],       # Number of trees
+    'learning_rate': [0.05, 0.1],   # Step size shrinkage
+    'max_depth': [5, 7],            # Max depth of a tree
+    # 'colsample_bytree': [0.8],    # Subsample ratio of columns when constructing each tree
+    # 'subsample': [0.8],           # Subsample ratio of the training instances
+}
+GRIDSEARCH_CV_FOLDS = 3
+SAMPLE_FRACTION_FOR_GRIDSEARCH = 1.0 # 1.0 for full train set, or <1.0 for a sample
+GRIDSEARCH_SCORING = 'f1_macro'
+
+warnings.filterwarnings("ignore", message="Parameters: {.*use_label_encoder.*} are not used.", category=UserWarning)
+warnings.filterwarnings("ignore", message="omp_set_nested routine deprecated, please use omp_set_max_active_levels instead.", category=UserWarning)
 
 
-# --- 1. Load Labels, Indices, and Label Encoder ---
-print("--- Loading Data ---")
-print(f"Loading train/test split data from: {NPZ_FILE}")
-try:
-    split_data = np.load(NPZ_FILE)
-    train_indices = split_data['train_indices'] # Original dataset indices for train set
-    test_indices = split_data['test_indices']   # Original dataset indices for test set
-    y_train = split_data['train_labels_numeric'] # Numeric (0-3) broad category labels
-    y_test = split_data['test_labels_numeric']
-except FileNotFoundError:
-    print(f"ERROR: NPZ file not found at {NPZ_FILE}. Ensure label splitting script has run.")
-    exit()
-except KeyError as e:
-    print(f"ERROR: Missing key {e} in NPZ file {NPZ_FILE}. Check keys.")
-    print(f"Available keys: {split_data.files if split_data else 'NPZ not loaded'}")
-    exit()
-
-print(f"Loaded {len(train_indices)} train indices and {len(y_train)} train labels.")
-print(f"Loaded {len(test_indices)} test indices and {len(y_test)} test labels.")
-
-if len(train_indices) != len(y_train) or len(test_indices) != len(y_test):
-    print("ERROR: Mismatch between number of indices and labels. Halting.")
-    exit()
-
-print(f"Loading label encoder from: {LABEL_ENCODER_FILE}")
-try:
-    with open(LABEL_ENCODER_FILE, 'rb') as f:
-        label_encoder = pickle.load(f)
-    class_names = label_encoder.classes_
-    print(f"Class names for classification: {class_names}")
-    if len(class_names) != 4: # Assuming 4 broad categories
-        print(f"Warning: Expected 4 class names, got {len(class_names)}.")
-except FileNotFoundError:
-    print(f"ERROR: Label encoder file not found at {LABEL_ENCODER_FILE}.")
-    exit()
-
-# --- 2. Helper Functions ---
+# --- Helper Functions (plot_confusion_matrix - can be reused) ---
 def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.cm.Blues, results_path=None, filename=None):
+    # (Same as your previous script)
     plt.figure(figsize=(max(8, len(classes)), max(6, len(classes)*0.8)))
     sns.heatmap(cm, annot=True, fmt="d", cmap=cmap, xticklabels=classes, yticklabels=classes)
     plt.title(plot_title)
@@ -82,211 +73,327 @@ def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.c
     plt.xlabel('Predicted label')
     plt.tight_layout()
     if results_path and filename:
+        os.makedirs(results_path, exist_ok=True)
         full_path = os.path.join(results_path, filename)
         plt.savefig(full_path)
         print(f"Saved confusion matrix to {full_path}")
     plt.close()
 
+# --- Feature Loading Functions for BALANCED Vanilla BoVW ---
+def load_balanced_vanilla_bovw_histograms_and_labels(hist_dir, feature_name_in_file, set_type, K_val):
+    """Loads X (histograms) and y (labels) from .npy files for balanced vanilla BoVW."""
+    hist_filename = f"X_{set_type}_{feature_name_in_file}_vanilla_k{K_val}.npy"
+    labels_filename = f"y_{set_type}_{feature_name_in_file}_vanilla_labels_k{K_val}.npy"
 
-# --- XGBoost Training Function ---
-def train_and_evaluate_xgb(X_train_data, y_train_labels, X_test_data, y_test_labels,
-                           feature_type_desc, target_class_names,
-                           output_results_dir, perform_scaling=False): # Scaling often less critical for XGB
-    print(f"\n--- Training XGBoost for {feature_type_desc} ---")
+    hist_filepath = os.path.join(hist_dir, hist_filename)
+    labels_filepath = os.path.join(hist_dir, labels_filename)
 
-    if X_train_data is None or X_train_data.size == 0 or X_test_data is None or X_test_data.size == 0:
-        print(f"Skipping XGBoost for {feature_type_desc}: Missing/empty feature data.")
-        return None
+    X_features, y_labels = None, None
+    print(f"Attempting to load: {hist_filepath} and {labels_filepath}")
 
-    X_train_processed = X_train_data.copy()
-    X_test_processed = X_test_data.copy()
+    if os.path.exists(hist_filepath):
+        try: X_features = np.load(hist_filepath)
+        except Exception as e: print(f"ERROR loading {hist_filepath}: {e}"); return None, None
+    else: print(f"ERROR: Feature file not found: {hist_filepath}"); return None, None
+
+    if os.path.exists(labels_filepath):
+        try: y_labels = np.load(labels_filepath)
+        except Exception as e: print(f"ERROR loading {labels_filepath}: {e}"); return X_features, None
+    else: print(f"ERROR: Label file not found: {labels_filepath}"); return X_features, None
+
+    if X_features is not None and y_labels is not None:
+        print(f"  Loaded {set_type} {feature_name_in_file} BoVW features shape: {X_features.shape}, Labels shape: {y_labels.shape}")
+        if X_features.shape[0] != y_labels.shape[0]:
+            print(f"  ERROR: Mismatch between feature count ({X_features.shape[0]}) and label count ({y_labels.shape[0]}).")
+            return None, None
+    return X_features, y_labels
+
+def load_balanced_global_hog_data(hog_h5_base_dir, set_type):
+    """Loads global HOG X and y from HDF5 created by SOH_extract_vanilla_balanced.py."""
+    hog_filepath = os.path.join(hog_h5_base_dir, f'hog_data_{set_type}_balanced.h5')
     
-    # Note: XGBoost handles multi-class by default. Labels should be 0 to N-1.
-    # GPU usage: tree_method='hist', device='cuda' (for newer XGBoost) or device='gpu'
-    # In mid-2025, 'cuda' is standard.
+    if not os.path.exists(hog_filepath):
+        print(f"ERROR: Global HOG HDF5 file not found: {hog_filepath}")
+        return None, None
+    
+    X_hog, y_hog_labels = None, None
+    print(f"Attempting to load HOG data: {hog_filepath}")
     try:
-        base_estimator_xgb = xgb.XGBClassifier(objective='multi:softprob', # Output probabilities
-                                            # objective='multi:softmax', # Output direct class predictions
-                                            num_class=len(target_class_names), # Explicitly set for softmax
-                                            tree_method='hist',      # Essential for GPU & large datasets
-                                            device='cuda',           # Use GPU
-                                            eval_metric='mlogloss',  # Logarithmic loss for multi-class
-                                            random_state=42,
-                                            use_label_encoder=False) # Suppress warning for newer XGBoost
-    except xgb.core.XGBoostError as e:
-        if "Cannot find CUDA device" in str(e) or "No GPU found" in str(e):
-            print("XGBoost CUDA device not found. Falling back to CPU for XGBoost.")
-            base_estimator_xgb = xgb.XGBClassifier(objective='multi:softprob',
-                                                num_class=len(target_class_names),
-                                                tree_method='hist', # hist is good for CPU too
-                                                eval_metric='mlogloss',
-                                                random_state=42,
-                                                use_label_encoder=False)
-        else:
-            print(f"Error initializing XGBoost: {e}")
-            return None
+        with h5py.File(hog_filepath, 'r') as hf:
+            if 'hog_features' in hf and 'labels_numeric' in hf:
+                X_hog = hf['hog_features'][:]
+                y_hog_labels = hf['labels_numeric'][:]
+                print(f"  Loaded global HOG for {set_type}. Features shape: {X_hog.shape}, Labels shape: {y_hog_labels.shape}")
+            else: print(f"  ERROR: 'hog_features' or 'labels_numeric' not found in {hog_filepath}"); return None, None
+    except Exception as e: print(f"  ERROR loading HOG from {hog_filepath}: {e}"); return None, None
+
+    if X_hog is not None and y_hog_labels is not None and X_hog.shape[0] != y_hog_labels.shape[0]:
+        print(f"  ERROR: Mismatch HOG feature count ({X_hog.shape[0]}) and label count ({y_hog_labels.shape[0]}).")
+        return None, None
+    return X_hog, y_hog_labels
 
 
-    # Scaling for XGBoost (Optional, usually not as impactful as for SVMs)
+# --- DMatrix Creation, GridSearchCV, Training/Evaluation Functions ---
+# These (create_dmatrix_from_features, find_best_params_with_gridsearch, train_and_evaluate_xgb_dmatrix)
+# are copied from the SPM_SOH_XGBoost_Classification_balanced.py script.
+# Ensure they are present or imported correctly. For this example, I'll assume they are copied.
+def create_dmatrix_from_features(X_data, y_data, set_type, feature_desc, output_dir,
+                                 perform_scaling=False, scaler_to_use_or_fit=None, sample_weights=None):
+    # (Copied from SPM balanced classification - it's generic)
+    print(f"\n--- Creating DMatrix for: {feature_desc} ({set_type}) ---")
+    filename_base = f"{set_type}_{feature_desc}"
+    if set_type == 'train' and sample_weights is not None: filename_base += "_weighted"
+    if perform_scaling: filename_base += "_scaled"
+    dmatrix_filename = os.path.join(output_dir, f"{filename_base}.buffer")
+    scaler_filename = os.path.join(output_dir, f"scaler_train_{feature_desc}.joblib")
+    dmatrix_exists = os.path.exists(dmatrix_filename)
+    scaler_needed_and_missing = (set_type == 'train' and perform_scaling and not os.path.exists(scaler_filename))
+    if dmatrix_exists and not scaler_needed_and_missing:
+        print(f"DMatrix {dmatrix_filename} exists. Skipping.")
+        loaded_scaler = None
+        if perform_scaling:
+            if set_type == 'train' and os.path.exists(scaler_filename): loaded_scaler = joblib.load(scaler_filename)
+            elif set_type == 'test' and scaler_to_use_or_fit: loaded_scaler = scaler_to_use_or_fit
+        return dmatrix_filename, loaded_scaler
+    X_processed = X_data.copy()
+    fitted_scaler = None
     if perform_scaling:
-        print(f"Scaling features for XGBoost: {feature_type_desc}...")
-        scaler_xgb = StandardScaler()
-        X_train_processed = scaler_xgb.fit_transform(X_train_processed)
-        X_test_processed = scaler_xgb.transform(X_test_processed)
-        scaler_filename_xgb = os.path.join(output_results_dir, f'scaler_xgb_{feature_type_desc.replace(" ", "_")}.joblib')
-        joblib.dump(scaler_xgb, scaler_filename_xgb)
-        print(f"Saved XGBoost scaler for {feature_type_desc} to {scaler_filename_xgb}")
-
-    # Parameters for XGBoost GridSearchCV - adjust as needed
-    # This is a smaller grid for faster initial runs
-    param_grid_xgb = {
-        'n_estimators': [300],
-        'learning_rate': [0.05, 0.1],
-        'max_depth': [7], # Changed from 6 to 7 as it's a common depth
-    }
-
-    print(f"Performing GridSearchCV for XGBoost on {feature_type_desc} (cv=3)...")
-    # n_jobs for GridSearchCV with XGBoost on GPU:
-    # - If XGBoost internally uses all GPU resources, n_jobs for GridSearchCV might be best set to 1.
-    # - Or, if GridSearchCV parallelizes by running separate XGBoost instances, it might work.
-    # - Test with n_jobs=1 first if GPU is the bottleneck.
-    # - If you have many CPU cores and GPU is not fully utilized by one XGBoost, n_jobs=-1 might be fine.
-    xgb_grid_search = GridSearchCV(estimator=base_estimator_xgb,
-                                   param_grid=param_grid_xgb,
-                                   scoring='accuracy',
-                                   cv=3, verbose=2, n_jobs=1) # Start with n_jobs=1 for GPU
-    
-    xgb_grid_search.fit(X_train_processed, y_train_labels)
-
-    best_xgb_model = xgb_grid_search.best_estimator_
-    print(f"Best XGBoost parameters for {feature_type_desc}: {xgb_grid_search.best_params_}")
-
-    model_filename_xgb = os.path.join(output_results_dir, f'xgb_model_{feature_type_desc.replace(" ", "_")}.joblib')
-    joblib.dump(best_xgb_model, model_filename_xgb) # Save using joblib or XGBoost's own save_model
-    # best_xgb_model.save_model(model_filename_xgb.replace(".joblib", ".json")) # XGBoost native format
-    print(f"Saved best XGBoost model for {feature_type_desc} to {model_filename_xgb}")
-
-    print(f"\n--- Evaluating XGBoost for {feature_type_desc} ---")
-    y_pred_labels_xgb = best_xgb_model.predict(X_test_processed)
-    # If objective was 'multi:softprob', predict_proba gives probabilities, predict gives class labels
-    # y_pred_labels_xgb = np.argmax(best_xgb_model.predict_proba(X_test_processed), axis=1) # If needed
-
-    accuracy_val_xgb = accuracy_score(y_test_labels, y_pred_labels_xgb)
-    class_report_str_xgb = classification_report(y_test_labels, y_pred_labels_xgb, target_names=target_class_names, zero_division=0)
-    conf_matrix_xgb = confusion_matrix(y_test_labels, y_pred_labels_xgb, labels=np.arange(len(target_class_names)))
-
-    print(f"Accuracy (XGBoost - {feature_type_desc}): {accuracy_val_xgb:.4f}")
-    print(f"Classification Report (XGBoost - {feature_type_desc}):\n{class_report_str_xgb}")
-    print(f"Confusion Matrix (XGBoost - {feature_type_desc}):\n{conf_matrix_xgb}")
-    plot_confusion_matrix(conf_matrix_xgb, classes=target_class_names,
-                          plot_title=f'CM for XGBoost - {feature_type_desc} (Acc: {accuracy_val_xgb:.3f})',
-                          results_path=output_results_dir,
-                          filename=f'cm_xgb_{feature_type_desc.replace(" ", "_")}.png')
-
-    results_text_file_xgb = os.path.join(output_results_dir, f'results_xgb_{feature_type_desc.replace(" ", "_")}.txt')
-    with open(results_text_file_xgb, 'w') as f:
-        f.write(f"--- XGBoost Results for {feature_type_desc} ---\n")
-        f.write(f"Scaling: {perform_scaling}\nParams: {xgb_grid_search.best_params_}\nCV Score: {xgb_grid_search.best_score_:.4f}\nAccuracy: {accuracy_val_xgb:.4f}\n\nReport:\n{class_report_str_xgb}\n\nCM:\n{np.array2string(conf_matrix_xgb)}")
-    print(f"Saved XGBoost results for {feature_type_desc} to {results_text_file_xgb}")
-    return best_xgb_model
-
-# --- 3. Feature Loading Functions (load_bovw_features, load_and_align_global_hog) ---
-# These are the same as in your script. For brevity, I'll assume they are correctly defined above.
-def load_bovw_features(bovw_dir, feature_name, set_type="train"):
-    filename = f"X_{set_type}_{feature_name}_bovw.npy" # Assuming no k_value in filename
-    # If your files are named X_train_sift_k1000_bovw.npy, use:
-    # filename = f"X_{set_type}_{feature_name}_k{VOCAB_SIZE}_bovw.npy"
-    filepath = os.path.join(bovw_dir, filename)
-    if os.path.exists(filepath):
-        print(f"Loading {set_type} {feature_name} BoVW features from: {filepath}")
-        data = np.load(filepath)
-        print(f"  Shape: {data.shape}")
-        return data
-    else:
-        print(f"Warning: {feature_name} BoVW file not found: {filepath}")
-        return None
-
-def load_and_align_global_hog(hog_h5_filepath, target_indices_for_set):
-    if not os.path.exists(hog_h5_filepath):
-        print(f"Warning: Global HOG data file not found: {hog_h5_filepath}")
-        return None
-    print(f"Loading global HOG features from: {hog_h5_filepath}")
+        if set_type == 'train':
+            scaler = StandardScaler(); X_processed = scaler.fit_transform(X_processed)
+            joblib.dump(scaler, scaler_filename); print(f"Saved scaler to {scaler_filename}"); fitted_scaler = scaler
+        elif set_type == 'test' and scaler_to_use_or_fit:
+            X_processed = scaler_to_use_or_fit.transform(X_processed); fitted_scaler = scaler_to_use_or_fit
+        elif set_type == 'test': print("WARNING: Scaling for test, but no scaler. Using unscaled.")
     try:
-        with h5py.File(hog_h5_filepath, 'r') as hf:
-            all_hog_features = hf['hog_features'][:]
-            all_hog_original_indices = hf['indices'][:]
+        if not X_processed.flags['C_CONTIGUOUS']: X_processed = np.ascontiguousarray(X_processed)
+        dmatrix = xgb.DMatrix(X_processed, label=y_data.astype(np.float32), weight=sample_weights if set_type == 'train' else None)
+        dmatrix.save_binary(dmatrix_filename); print(f"Saved DMatrix to {dmatrix_filename}")
+        del X_processed, dmatrix; gc.collect()
+        return dmatrix_filename, fitted_scaler
+    except Exception as e: print(f"ERROR creating DMatrix for {feature_desc} ({set_type}): {e}"); return None, None
+
+def find_best_params_with_gridsearch(X_train_for_gs, y_train_for_gs, num_classes, base_params, param_grid, cv_folds, feature_type_desc, scoring_metric, perform_scaling=True):
+    # (Copied from SPM balanced classification - it's generic)
+    print(f"\n--- GridSearchCV for {feature_type_desc} (Data size: {X_train_for_gs.shape[0]}) ---")
+    X_scaled_for_gs = X_train_for_gs
+    if perform_scaling: scaler_gs = StandardScaler(); X_scaled_for_gs = scaler_gs.fit_transform(X_train_for_gs); del scaler_gs
+    weights_dict_gs = compute_class_weight(class_weight='balanced', classes=np.arange(num_classes), y=y_train_for_gs)
+    weights_per_sample_gs = np.array([weights_dict_gs[label] for label in y_train_for_gs])
+    best_params, best_score = None, -1.0
+    final_xgb_params = {**base_params, 'num_class': num_classes}
+    try: # GPU
+        gpu_specific_params = {**final_xgb_params, 'device': 'cuda'}
+        estimator_gpu = xgb.XGBClassifier(**gpu_specific_params)
+        gs_gpu = GridSearchCV(estimator_gpu, param_grid, scoring=scoring_metric, cv=cv_folds, verbose=1, n_jobs=1)
+        gs_gpu.fit(X_scaled_for_gs, y_train_for_gs, sample_weight=weights_per_sample_gs)
+        best_params, best_score = gs_gpu.best_params_, gs_gpu.best_score_
+        print(f"GS GPU: Best {scoring_metric}: {best_score:.4f}")
+        final_xgb_params.update(best_params); final_xgb_params['device'] = 'cuda'
+    except Exception as gpu_err:
+        print(f"GS GPU failed: {gpu_err}. Trying CPU.")
+        if 'device' in final_xgb_params: del final_xgb_params['device']
+        try: # CPU
+            estimator_cpu = xgb.XGBClassifier(**final_xgb_params)
+            gs_cpu = GridSearchCV(estimator_cpu, param_grid, scoring=scoring_metric, cv=cv_folds, verbose=1, n_jobs=-1)
+            gs_cpu.fit(X_scaled_for_gs, y_train_for_gs, sample_weight=weights_per_sample_gs)
+            best_params, best_score = gs_cpu.best_params_, gs_cpu.best_score_
+            print(f"GS CPU: Best {scoring_metric}: {best_score:.4f}")
+            final_xgb_params.update(best_params)
+        except Exception as cpu_err: print(f"GS CPU failed: {cpu_err}"); return None
+    del X_scaled_for_gs, weights_per_sample_gs; gc.collect()
+    if best_params: final_xgb_params['_gridsearch_scoring'] = scoring_metric; return final_xgb_params
+    return None
+
+def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_actual, best_params_from_search, feature_type_desc, target_class_names_list, output_results_dir_path, num_actual_classes):
+    # (Copied from SPM balanced classification - it's generic)
+    print(f"\n--- Training FINAL XGBoost for {feature_type_desc} using DMatrix ---")
+    if not (os.path.exists(dtrain_path) and os.path.exists(dtest_path)): print("ERROR: DMatrix files missing."); return None
+    dtrain = xgb.DMatrix(dtrain_path); dtest = xgb.DMatrix(dtest_path)
+    dtest.set_label(y_test_actual.astype(np.float32))
+    final_params = {**best_params_from_search}; gs_scoring = final_params.pop('_gridsearch_scoring', 'accuracy')
+    actual_device = 'cpu'; final_params.pop('device', None) 
+    if best_params_from_search.get('device') == 'cuda':
+        try: 
+            temp_d = xgb.DMatrix(np.random.rand(2,dtrain.num_col()),label=np.random.randint(0,num_actual_classes,2))
+            xgb.train(final_params, temp_d, num_boost_round=1, device='cuda', evals=[(temp_d,'eval')], verbose_eval=False) # Added verbose_eval=False for silent check
+            actual_device = 'cuda'; final_params['device'] = 'cuda'
+        except: print("GPU final train check failed, using CPU.")
+    
+    num_boost = final_params.pop('n_estimators', 300)
+    print(f"Starting final training ({actual_device}) with params: {final_params}")
+    bst = xgb.train(final_params, dtrain, num_boost_round=num_boost, evals=[(dtrain,'train'),(dtest,'eval')], early_stopping_rounds=50, verbose_eval=100)
+    bst.save_model(os.path.join(output_results_dir_path, f'xgb_model_{feature_type_desc}.json'))
+    y_pred_proba = bst.predict(dtest, iteration_range=(0, bst.best_iteration + 1)); y_pred = np.argmax(y_pred_proba, axis=1)
+    acc = accuracy_score(y_test_actual, y_pred); f1 = f1_score(y_test_actual, y_pred, average='macro', zero_division=0)
+    report = classification_report(y_test_actual, y_pred, target_names=target_class_names_list, labels=np.arange(num_actual_classes), zero_division=0)
+    cm = confusion_matrix(y_test_actual, y_pred, labels=np.arange(num_actual_classes))
+    print(f"Final Model ({actual_device}) - Test Acc: {acc:.4f}, F1-macro: {f1:.4f}\nReport:\n{report}")
+    plot_confusion_matrix(cm, target_class_names_list, f'CM {feature_type_desc} (Acc:{acc:.3f}, F1:{f1:.3f})', results_path=output_results_dir_path, filename=f'cm_xgb_{feature_type_desc}.png')
+    with open(os.path.join(output_results_dir_path, f'results_xgb_{feature_type_desc}.txt'), 'w') as f_out:
+        f_out.write(f"Results for {feature_type_desc}\nGS Params: {best_params_from_search}\nFinal Train Device: {actual_device}\nTest Acc: {acc:.4f}\nF1-macro: {f1:.4f}\n\nReport:\n{report}\n\nCM:\n{np.array2string(cm)}")
+    print(f"Results saved for {feature_type_desc}.")
+    del dtrain, dtest, bst; gc.collect()
+    return True
+
+# --- Main Execution Pipeline for BALANCED Vanilla BoVW ---
+def run_balanced_vanilla_bovw_classification_pipeline():
+    print("\n--- Starting BALANCED NORMAL BoVW Classification Pipeline ---")
+
+    # --- 1. Load Label Encoder ---
+    label_encoder_files = glob.glob(LABEL_ENCODER_FILE_PATTERN)
+    if not label_encoder_files:
+        print(f"ERROR: No label encoder file found matching pattern: {LABEL_ENCODER_FILE_PATTERN}")
+        print(f"Please ensure 'create_balanced_split_for_bovw.py' has run and created the encoder PKL.")
+        return
+    label_encoder_path = label_encoder_files[0] # Assume one relevant encoder
+    print(f"Loading label encoder from: {label_encoder_path}")
+    try:
+        with open(label_encoder_path, 'rb') as f:
+            label_encoder = pickle.load(f)
+        class_names_global = label_encoder.classes_
+        num_classes_global = len(class_names_global)
+        XGB_BASE_PARAMS['num_class'] = num_classes_global # Set for XGBoost
+        print(f"Class names: {class_names_global} ({num_classes_global} classes)")
+        if num_classes_global != 4: print(f"Warning: Expected 4 classes, got {num_classes_global}")
     except Exception as e:
-        print(f"Error loading HOG data from {hog_h5_filepath}: {e}")
-        return None
-    if all_hog_features.ndim == 1:
-        if len(target_indices_for_set) == 1 and all_hog_features.shape[0] > 1:
-             all_hog_features = all_hog_features.reshape(1, -1)
-        else:
-             print("Error: Cannot safely reshape 1D HOG features for multiple indices.")
-             return None
-    if all_hog_features.shape[0] == 0 or all_hog_original_indices.shape[0] == 0:
-        print("Warning: No HOG features or indices found in HDF5 file.")
-        return None
-    hog_feature_map = {original_idx: i for i, original_idx in enumerate(all_hog_original_indices)}
-    aligned_hog_list = []
-    missing_count = 0
-    hog_feature_dim = all_hog_features.shape[1]
-    for target_idx in target_indices_for_set:
-        if target_idx in hog_feature_map:
-            aligned_hog_list.append(all_hog_features[hog_feature_map[target_idx]])
-        else:
-            aligned_hog_list.append(np.zeros(hog_feature_dim, dtype=all_hog_features.dtype))
-            missing_count += 1
-    if missing_count > 0:
-        print(f"  Warning: {missing_count}/{len(target_indices_for_set)} HOG features for current set not found. Used zero vectors.")
-    aligned_hog_array = np.array(aligned_hog_list) if aligned_hog_list else np.empty((0, hog_feature_dim))
-    print(f"  Aligned global HOG shape: {aligned_hog_array.shape}")
-    return aligned_hog_array
+        print(f"ERROR loading label encoder: {e}"); return
 
+    # --- Define Feature Combinations ---
+    # Filenames will be like X_train_sift_vanilla_k1000.npy
+    sift_vanilla_name_key = "sift" # Used in load_balanced_normal_bovw_histograms_and_labels
+    orb_vanilla_name_key = "orb"
+    hog_global_name_key = "hog" # Used for logic, not directly in filename for HOG loader
 
-# --- 5. Train and Evaluate Classifiers ---
-# SVMs take too long. Will use XGBoost for GPU usage. You can battle building the thundersvm if you want but fuck that I gave up
-# Set to True to run XGBoost, False to skip XGBoost
-RUN_XGBOOST_CLASSIFIERS = True
+    # Keys for feature_sets_to_run become part of filenames/descriptions
+    feature_sets_to_run = {
+        f"Vanilla_SIFT_k{VOCAB_SIZE_FOR_LOADING}": {sift_vanilla_name_key: True},
+        f"Vanilla_ORB_k{VOCAB_SIZE_FOR_LOADING}": {orb_vanilla_name_key: True},
+        "Global_HOG": {hog_global_name_key: True}, # If using HOG alone
+        f"Vanilla_SIFT_k{VOCAB_SIZE_FOR_LOADING}_HOG": {sift_vanilla_name_key: True, hog_global_name_key: True},
+        f"Vanilla_ORB_k{VOCAB_SIZE_FOR_LOADING}_HOG": {orb_vanilla_name_key: True, hog_global_name_key: True},
+        f"Vanilla_SIFT_ORB_k{VOCAB_SIZE_FOR_LOADING}_HOG": {sift_vanilla_name_key: True, orb_vanilla_name_key: True, hog_global_name_key: True},
+    }
+    all_best_params_results = {}
 
-def test():
-    # --- 4. Load Feature Sets ---
-    print("\n--- Loading Feature Sets ---")
-    X_train_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "train")
-    X_test_sift_bovw = load_bovw_features(BOVW_FEATURES_DIR, "sift", "test")
-    X_train_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "train")
-    X_test_orb_bovw = load_bovw_features(BOVW_FEATURES_DIR, "orb", "test")
-    X_train_hog_global = load_and_align_global_hog(HOG_DATA_FILE, train_indices)
-    X_test_hog_global = load_and_align_global_hog(HOG_DATA_FILE, test_indices)
+    for feature_desc_for_file, include_features_map in feature_sets_to_run.items():
+        print(f"\n\n{'='*20} Processing Feature Set: {feature_desc_for_file} {'='*20}")
 
-    if RUN_XGBOOST_CLASSIFIERS:
-        print("\n--- Training and Evaluating XGBoost Classifiers ---")
-        # XGBoost Individual Features (Scaling typically not needed, or can be set to False in function call)
-        if X_train_sift_bovw is not None and X_test_sift_bovw is not None:
-            train_and_evaluate_xgb(X_train_sift_bovw, y_train, X_test_sift_bovw, y_test,
-                                f"SIFT_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-        if X_train_orb_bovw is not None and X_test_orb_bovw is not None:
-            train_and_evaluate_xgb(X_train_orb_bovw, y_train, X_test_orb_bovw, y_test,
-                                f"ORB_BoVW", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-        if X_train_hog_global is not None and X_test_hog_global is not None:
-            train_and_evaluate_xgb(X_train_hog_global, y_train, X_test_hog_global, y_test,
-                                "HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-        # XGBoost Combined Features
-        if X_train_sift_bovw is not None and X_train_hog_global is not None:
-            if X_train_sift_bovw.shape[0] == X_train_hog_global.shape[0]:
-                X_train_sift_hog = np.concatenate((X_train_sift_bovw, X_train_hog_global), axis=1)
-                X_test_sift_hog = np.concatenate((X_test_sift_bovw, X_test_hog_global), axis=1)
-                train_and_evaluate_xgb(X_train_sift_hog, y_train, X_test_sift_hog, y_test, f"SIFT_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-        if X_train_orb_bovw is not None and X_train_hog_global is not None:
-            if X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
-                X_train_orb_hog = np.concatenate((X_train_orb_bovw, X_train_hog_global), axis=1)
-                X_test_orb_hog = np.concatenate((X_test_orb_bovw, X_test_hog_global), axis=1)
-                train_and_evaluate_xgb(X_train_orb_hog, y_train, X_test_orb_hog, y_test, f"ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
-        if X_train_sift_bovw is not None and X_train_orb_bovw is not None and X_train_hog_global is not None:
-            if X_train_sift_bovw.shape[0] == X_train_orb_bovw.shape[0] == X_train_hog_global.shape[0]:
-                X_train_all_xgb = np.concatenate((X_train_sift_bovw, X_train_orb_bovw, X_train_hog_global), axis=1)
-                X_test_all_xgb = np.concatenate((X_test_sift_bovw, X_test_orb_bovw, X_test_hog_global), axis=1)
-                train_and_evaluate_xgb(X_train_all_xgb, y_train, X_test_all_xgb, y_test, f"SIFT_ORB_HOG_Global", class_names, RESULTS_DIR_XGB, perform_scaling=False)
+        X_train_components, X_test_components = [], []
+        y_train_current_set, y_test_current_set = None, None # Labels for the current feature set
 
+        # --- Load Training Data Components ---
+        valid_train_data_loaded = True
+        if include_features_map.get(sift_vanilla_name_key):
+            X_sift_tr, y_sift_tr = load_balanced_vanilla_bovw_histograms_and_labels(NORMAL_BOVW_HISTOGRAMS_DIR, "sift", "train", VOCAB_SIZE_FOR_LOADING)
+            if X_sift_tr is None or y_sift_tr is None: valid_train_data_loaded = False; print("! SIFT train load failed")
+            else: X_train_components.append(X_sift_tr); y_train_current_set = y_sift_tr if y_train_current_set is None else y_train_current_set
+        
+        if include_features_map.get(orb_vanilla_name_key) and valid_train_data_loaded:
+            X_orb_tr, y_orb_tr = load_balanced_vanilla_bovw_histograms_and_labels(NORMAL_BOVW_HISTOGRAMS_DIR, "orb", "train", VOCAB_SIZE_FOR_LOADING)
+            if X_orb_tr is None or y_orb_tr is None: valid_train_data_loaded = False; print("! ORB train load failed")
+            else: X_train_components.append(X_orb_tr); y_train_current_set = y_orb_tr if y_train_current_set is None else y_train_current_set
+            if y_train_current_set is not None and y_orb_tr is not None and not np.array_equal(y_train_current_set, y_orb_tr): print("! ORB train label mismatch"); valid_train_data_loaded=False
 
-    print("\n--- Classification Pipeline Complete ---")
+        if include_features_map.get(hog_global_name_key) and valid_train_data_loaded:
+            X_hog_tr, y_hog_tr = load_balanced_global_hog_data(HOG_FEATURES_BALANCED_DIR, "train")
+            if X_hog_tr is None or y_hog_tr is None: valid_train_data_loaded = False; print("! HOG train load failed")
+            else: X_train_components.append(X_hog_tr); y_train_current_set = y_hog_tr if y_train_current_set is None else y_train_current_set
+            if y_train_current_set is not None and y_hog_tr is not None and not np.array_equal(y_train_current_set, y_hog_tr): print("! HOG train label mismatch"); valid_train_data_loaded=False
+
+        if not valid_train_data_loaded or not X_train_components or y_train_current_set is None:
+            print(f"Skipping {feature_desc_for_file} due to training data load failure."); continue
+        
+        X_train_combined = np.concatenate(X_train_components, axis=1) if len(X_train_components) > 1 else X_train_components[0]
+        del X_train_components; gc.collect()
+        print(f"Combined training features for {feature_desc_for_file}: {X_train_combined.shape}")
+
+        # --- Load Test Data Components ---
+        valid_test_data_loaded = True
+        if include_features_map.get(sift_vanilla_name_key):
+            X_sift_te, y_sift_te = load_balanced_vanilla_bovw_histograms_and_labels(NORMAL_BOVW_HISTOGRAMS_DIR, "sift", "test", VOCAB_SIZE_FOR_LOADING)
+            if X_sift_te is None or y_sift_te is None: valid_test_data_loaded = False; print("! SIFT test load failed")
+            else: X_test_components.append(X_sift_te); y_test_current_set = y_sift_te if y_test_current_set is None else y_test_current_set
+
+        if include_features_map.get(orb_vanilla_name_key) and valid_test_data_loaded:
+            X_orb_te, y_orb_te = load_balanced_vanilla_bovw_histograms_and_labels(NORMAL_BOVW_HISTOGRAMS_DIR, "orb", "test", VOCAB_SIZE_FOR_LOADING)
+            if X_orb_te is None or y_orb_te is None: valid_test_data_loaded = False; print("! ORB test load failed")
+            else: X_test_components.append(X_orb_te); y_test_current_set = y_orb_te if y_test_current_set is None else y_test_current_set
+            if y_test_current_set is not None and y_orb_te is not None and not np.array_equal(y_test_current_set, y_orb_te): print("! ORB test label mismatch"); valid_test_data_loaded=False
+        
+        if include_features_map.get(hog_global_name_key) and valid_test_data_loaded:
+            X_hog_te, y_hog_te = load_balanced_global_hog_data(HOG_FEATURES_BALANCED_DIR, "test")
+            if X_hog_te is None or y_hog_te is None: valid_test_data_loaded = False; print("! HOG test load failed")
+            else: X_test_components.append(X_hog_te); y_test_current_set = y_hog_te if y_test_current_set is None else y_test_current_set
+            if y_test_current_set is not None and y_hog_te is not None and not np.array_equal(y_test_current_set, y_hog_te): print("! HOG test label mismatch"); valid_test_data_loaded=False
+
+        if not valid_test_data_loaded or not X_test_components or y_test_current_set is None:
+            print(f"Skipping {feature_desc_for_file} due to test data load failure."); continue
+        
+        X_test_combined = np.concatenate(X_test_components, axis=1) if len(X_test_components) > 1 else X_test_components[0]
+        del X_test_components; gc.collect()
+        print(f"Combined test features for {feature_desc_for_file}: {X_test_combined.shape}")
+
+        # Ensure train and test labels align if all components loaded successfully
+        if not (np.array_equal(y_train_current_set, y_test_current_set) if (y_train_current_set is not None and y_test_current_set is not None and len(y_train_current_set) == len(y_test_current_set) and feature_desc_for_file == hog_global_name_key) # Special case if HOG is the ONLY feature
+                else (X_train_combined.shape[0] == y_train_current_set.shape[0] and X_test_combined.shape[0] == y_test_current_set.shape[0])):
+             print(f"! CRITICAL: Final label alignment check failed for {feature_desc_for_file}. Train features {X_train_combined.shape[0]} vs labels {y_train_current_set.shape[0]}. Test features {X_test_combined.shape[0]} vs labels {y_test_current_set.shape[0]}. Skipping.")
+             del X_train_combined, X_test_combined, y_train_current_set, y_test_current_set; gc.collect()
+             continue
+
+        # --- GridSearchCV (on sample or full train) ---
+        X_gs_data, y_gs_data = X_train_combined, y_train_current_set
+        if SAMPLE_FRACTION_FOR_GRIDSEARCH < 1.0 and len(y_train_current_set) > 10 : # Min samples for stratify
+            try:
+                # train_test_split returns a list for X if X is a list, we need the features part
+                # Here X_train_combined is already a numpy array
+                _, X_gs_data, _, y_gs_data = train_test_split(
+                    X_train_combined, y_train_current_set, 
+                    test_size=(1.0 - SAMPLE_FRACTION_FOR_GRIDSEARCH), # Correct way to get train_size
+                    random_state=42, stratify=y_train_current_set
+                )
+                print(f"Using {X_gs_data.shape[0]} samples for GridSearchCV ({SAMPLE_FRACTION_FOR_GRIDSEARCH*100:.1f}% of train).")
+            except ValueError as e_gs_split: # Handle cases like not enough samples in a class
+                print(f"Warning: Stratified split for GridSearchCV failed ({e_gs_split}). Using full train set for GS.")
+                X_gs_data, y_gs_data = X_train_combined, y_train_current_set
+        
+        current_best_params = find_best_params_with_gridsearch(
+            X_gs_data, y_gs_data, num_classes_global,
+            XGB_BASE_PARAMS, PARAM_GRID_XGB, GRIDSEARCH_CV_FOLDS, 
+            feature_desc_for_file, GRIDSEARCH_SCORING, perform_scaling=True
+        )
+        if current_best_params is None: print(f"GridSearchCV failed for {feature_desc_for_file}. Skipping final train."); continue
+        all_best_params_results[feature_desc_for_file] = current_best_params
+        if X_gs_data is not X_train_combined : del X_gs_data # Clean sample if it was a copy
+        if y_gs_data is not y_train_current_set : del y_gs_data
+        gc.collect()
+        
+        # --- DMatrices (Scaled & Weighted for Train) ---
+        train_class_weights = compute_class_weight('balanced', classes=np.arange(num_classes_global), y=y_train_current_set)
+        train_sample_w = np.array([train_class_weights[lbl] for lbl in y_train_current_set])
+        
+        dtrain_path, fitted_scaler = create_dmatrix_from_features(
+            X_train_combined, y_train_current_set, "train", feature_desc_for_file, DMATRIX_CACHE_DIR_VANILLA_BALANCED,
+            perform_scaling=True, sample_weights=train_sample_w
+        )
+        del X_train_combined; gc.collect()
+        
+        dtest_path, _ = create_dmatrix_from_features(
+            X_test_combined, y_test_current_set, "test", feature_desc_for_file, DMATRIX_CACHE_DIR_VANILLA_BALANCED,
+            perform_scaling=True, scaler_to_use_or_fit=fitted_scaler # Use scaler from train
+        )
+        del X_test_combined, fitted_scaler; gc.collect()
+
+        if not dtrain_path or not dtest_path: print(f"DMatrix creation failed for {feature_desc_for_file}. Skipping."); continue
+
+        # --- Train Final Model ---
+        train_and_evaluate_xgb_dmatrix(
+            dtrain_path, dtest_path, y_test_current_set,
+            current_best_params, feature_desc_for_file, class_names_global,
+            RESULTS_DIR_XGB_VANILLA_BALANCED, num_classes_global
+        )
+        del y_train_current_set, y_test_current_set; gc.collect()
+
+    print("\n--- BALANCED NORMAL BoVW Classification Pipeline Complete ---")
+    print("Best parameters from GridSearchCV:")
+    for name, params in all_best_params_results.items(): print(f"  {name}: {params}")
+    print(f"Results saved to: {RESULTS_DIR_XGB_VANILLA_BALANCED}")

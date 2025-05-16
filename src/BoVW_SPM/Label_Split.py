@@ -4,17 +4,30 @@
 # 3. Outdoor Natural
 # 4. Outdoor Urban
 import tensorflow_datasets as tfds
+import tensorflow as tf
 import numpy as np
-import h5py
 import os
+import pickle
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-import pickle
+from tqdm import tqdm
+from PIL import Image # For saving images
+import shutil # For directory management if needed
 
-TFDS_DATA_DIR = "E:\CV_imgs"
-OUTPUT_FEATURES_DIR = "E:\CV_features"
-SUBSET_SIZE = 100000 # Should match what you used in feature extraction
-RANDOM_SEED = 30 # For reproducibility
+# --- Configuration ---
+TFDS_DATA_DIR = r"E:\CV_imgs" # Where TFDS downloaded Places365
+
+# NEW: Directory to store the selected raw images for BoVW processing
+# These images will be copied from the TFDS cache or saved directly.
+# This directory will have subfolders for each broad category, initially.
+BOVW_RAW_IMAGE_DATA_DIR = r"E:\CV_BoVW_Balanced_Raw_Images"
+
+# NEW: Directory where the NPZ file (with image paths and labels) and PKL (label encoder) will be saved
+OUTPUT_SPLITS_INFO_DIR_BOVW = r"E:\CV_features\bovw_splits_balanced"
+
+RANDOM_SEED = 42
+TARGET_IMAGES_PER_BROAD_CATEGORY = 25000
+MAX_TFDS_IMAGES_TO_SCAN = 350000
 
 # Define the broad categories, AI generated (hand checked)
 
@@ -392,146 +405,228 @@ broad_category_definitions = {
                          'yard',
                          'zen_garden']}
 
-def split_data():
-    # Load Dataset Info for Labels
-    print("Loading dataset info...")
+def create_balanced_split_for_bovw():
+    print(f"--- Starting Balanced Data Preparation for BoVW ({len(broad_categories_list)} Broad Categories) ---")
+    print(f"Targeting {TARGET_IMAGES_PER_BROAD_CATEGORY} images per broad category.")
+    print(f"Raw images for BoVW will be saved to: {BOVW_RAW_IMAGE_DATA_DIR}")
+    print(f"Split information (NPZ/PKL) will be saved to: {OUTPUT_SPLITS_INFO_DIR_BOVW}")
+
+    # Create output directories
+    os.makedirs(BOVW_RAW_IMAGE_DATA_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_SPLITS_INFO_DIR_BOVW, exist_ok=True)
+    for cat_name in broad_categories_list:
+        os.makedirs(os.path.join(BOVW_RAW_IMAGE_DATA_DIR, cat_name), exist_ok=True)
+
+    # --- 1. Load TFDS Dataset Info ---
+    print("\nLoading dataset info for 'places365_small'...")
     try:
-        ds_info = tfds.load('places365_small',
-                            data_dir=TFDS_DATA_DIR,
-                            with_info=True,
-                            download=False)[1]
+        # Load the 'train' split. We'll iterate through it without shuffling at this stage.
+        full_ds_train_tfds, ds_info = tfds.load(
+            'places365_small',
+            split='train',
+            data_dir=TFDS_DATA_DIR,
+            with_info=True,
+            download=False, # Assumes data is already downloaded by your download_dataset()
+            shuffle_files=False # CRITICAL for consistent iteration if script is rerun partway
+        )
     except Exception as e:
-        print(f"Error loading dataset info: {e}")
+        print(f"Error loading TFDS dataset info or base dataset: {e}")
+        print("Please ensure Places365 data is downloaded and TFDS_DATA_DIR is correct.")
         exit()
 
     fine_label_names = ds_info.features['label'].names
-    print(f"Total fine-grained classes: {len(fine_label_names)}")
-    
-    category_mapping_fine_to_broad = {}
-    all_fine_labels_in_mapping = set()
-    for broad_cat, fine_list in broad_category_definitions.items():
-        for fine_name in fine_list:
-            if fine_name in category_mapping_fine_to_broad:
-                print(f"Warning: Fine label '{fine_name}' mapped to '{category_mapping_fine_to_broad[fine_name]}' is being re-mapped to '{broad_cat}'. Ensure this is intended (e.g. resolving initial misclassification).")
-            category_mapping_fine_to_broad[fine_name] = broad_cat # Allow re-mapping to fix initial errors
-            all_fine_labels_in_mapping.add(fine_name)
+    num_fine_classes = len(fine_label_names)
+    total_tfds_train_images = ds_info.splits['train'].num_examples
+    print(f"Total fine-grained classes in Places365: {num_fine_classes}")
+    print(f"Total images in TFDS 'train' split: {total_tfds_train_images}")
 
-    # Check for missing fine-grained labels from TFDS that are not in your mapping
-    missing_fine_labels_from_tfds = []
-    tfds_fine_label_set = set(fine_label_names)
+    # --- 2. Setup Broad Category Mapping ---
+    print("\nSetting up and validating broad category mapping...")
+    fine_to_broad_mapping = {}
+    # Inverse mapping for easier lookup: broad_category -> list of fine_grained_indices
+    broad_to_fine_indices_mapping = {broad_cat: [] for broad_cat in broad_categories_list}
 
-    for fine_label_name_from_tfds in tfds_fine_label_set:
-        if fine_label_name_from_tfds not in all_fine_labels_in_mapping:
-            missing_fine_labels_from_tfds.append(fine_label_name_from_tfds)
-
-    if missing_fine_labels_from_tfds:
-        print(f"\nERROR: {len(missing_fine_labels_from_tfds)} fine-grained labels from TFDS are STILL NOT in your mapping dictionary:")
-        for mfl in sorted(missing_fine_labels_from_tfds):
-            print(f"  - {mfl}")
-        print("Please complete the 'broad_category_definitions' dictionary by adding these missing labels.")
-        exit() # Exit if still missing
-    else:
-        print("\nSuccess: All fine-grained labels from TFDS appear to be covered in your mapping definitions.")
-
-    # Check for labels in your mapping that are not in TFDS (typos, etc.)
-    extra_fine_labels_in_mapping = all_fine_labels_in_mapping - tfds_fine_label_set
-    if extra_fine_labels_in_mapping:
-        print(f"\nWARNING: {len(extra_fine_labels_in_mapping)} fine-grained labels are in your mapping dictionary but NOT in TFDS fine_grained_labels_names (potential typos or outdated labels):")
-        for efl in sorted(list(extra_fine_labels_in_mapping)):
-            print(f"  - {efl}")
-        print("You might want to remove or correct these in 'broad_category_definitions'.")
-
-    final_broad_categories = sorted(list(set(category_mapping_fine_to_broad.values())))
-    print(f"\nUnique Broad Categories Defined ({len(final_broad_categories)}): {final_broad_categories}")
-    if set(final_broad_categories) != set(broad_categories_list):
-        print("WARNING: The unique broad categories derived from your mapping do not exactly match your intended 'new_broad_categories_list'.")
-        print(f"  Intended: {sorted(broad_categories_list)}")
-        print(f"  Derived:  {final_broad_categories}")
-
-    # --- 3. Load Processed Image Indices and Original Fine-Grained Labels ---
-    print("\nLoading indices and original labels from HOG data file...")
-    hog_data_file = os.path.join(OUTPUT_FEATURES_DIR, 'hog_data.h5')
-    try:
-        with h5py.File(hog_data_file, 'r') as hf:
-            processed_image_indices = hf['indices'][:]
-            original_fine_grained_numeric_labels = hf['labels'][:]
-        print(f"Loaded {len(processed_image_indices)} indices and labels.")
-        if len(processed_image_indices) == 0 :
-            print("Error: No indices found in HOG data. Did feature extraction complete correctly?")
-            exit()
-    except Exception as e:
-        print(f"Error loading HOG data file {hog_data_file}: {e}")
-        exit()
-
-    # --- 4. Map Original Fine-Grained Labels to Broad Category Labels ---
-    print("\nMapping fine-grained labels to broad categories...")
-    mapped_broad_labels_str_list = []
-    valid_indices_for_split_list = []
-
-    for i in range(len(original_fine_grained_numeric_labels)):
-        fine_numeric_label = original_fine_grained_numeric_labels[i]
-        current_image_original_tfds_idx = processed_image_indices[i]
-
-        if 0 <= fine_numeric_label < len(fine_label_names):
-            fine_label_name = fine_label_names[fine_numeric_label]
-            if fine_label_name in category_mapping_fine_to_broad:
-                broad_label_name = category_mapping_fine_to_broad[fine_label_name]
-                mapped_broad_labels_str_list.append(broad_label_name)
-                valid_indices_for_split_list.append(current_image_original_tfds_idx)
+    # Populate fine_to_broad_mapping
+    unmapped_tfds_labels = set(fine_label_names)
+    for broad_cat, fine_list_for_cat in broad_category_definitions.items():
+        if broad_cat not in broad_categories_list:
+            print(f"Warning: Broad category '{broad_cat}' in definitions is not in broad_categories_list. Skipping.")
+            continue
+        for fine_name in fine_list_for_cat:
+            if fine_name in fine_label_names:
+                fine_to_broad_mapping[fine_name] = broad_cat
+                try: # Keep track of unmapped TFDS labels
+                    unmapped_tfds_labels.remove(fine_name)
+                except KeyError:
+                    print(f"Warning: Fine label '{fine_name}' in your definition for '{broad_cat}' was already mapped or not in TFDS originally.")
             else:
-                print(f"Critical Error: Fine label name '{fine_label_name}' (from TFDS) was not found in the final mapping dictionary, even after checks. This should not happen. Halting.")
-                exit()
-        else:
-            print(f"Warning: Invalid fine_numeric_label {fine_numeric_label} for original TFDS index {current_image_original_tfds_idx}. Skipping this image.")
+                print(f"Warning: Fine label '{fine_name}' defined for '{broad_cat}' is not a valid Places365 fine_label_name. Skipping.")
+    
+    if unmapped_tfds_labels:
+        print(f"\nERROR: {len(unmapped_tfds_labels)} fine-grained labels from TFDS are NOT in your 'broad_category_definitions':")
+        for unmapped_label in sorted(list(unmapped_tfds_labels))[:20]: # Print a sample
+            print(f"  - {unmapped_label}")
+        if len(unmapped_tfds_labels) > 20:
+            print(f"  ... and {len(unmapped_tfds_labels) - 20} more.")
+        print("Please complete your 'broad_category_definitions' to include all 365 fine-grained Places365 labels.")
+        # exit() # You might want to exit here in a real run
 
-    if not mapped_broad_labels_str_list:
-        print("Error: No labels were successfully mapped to broad categories. Check your mapping dictionary and data.")
+    print(f"Successfully processed {len(fine_to_broad_mapping)} fine-to-broad mappings.")
+
+    # --- 3. Select and Save/Copy Images for Balanced Broad Categories ---
+    print(f"\nScanning TFDS 'train' split to select and save images for BoVW...")
+    # This will store {'image_path': path_to_saved_img, 'broad_category': category_name}
+    # Grouped by broad category initially for easy counting
+    collected_items_by_category = {broad_cat: [] for broad_cat in broad_categories_list}
+    images_saved_count = {broad_cat: 0 for broad_cat in broad_categories_list}
+    total_images_to_select = len(broad_categories_list) * TARGET_IMAGES_PER_BROAD_CATEGORY
+    
+    # Enumerate the dataset to get a consistent index for each item if needed for filenames
+    # The original_tfds_idx can help make filenames unique if fine_label_name is not enough
+    ds_enumerated = full_ds_train_tfds.enumerate()
+
+    scanned_tfds_count = 0
+    total_images_saved_so_far = 0
+
+    with tqdm(total=min(total_tfds_train_images, MAX_TFDS_IMAGES_TO_SCAN), desc="Scanning & Saving for BoVW") as pbar:
+        for original_tfds_idx_tensor, item_tfds in ds_enumerated:
+            scanned_tfds_count += 1
+            pbar.update(1)
+
+            if scanned_tfds_count > MAX_TFDS_IMAGES_TO_SCAN:
+                print(f"\nReached MAX_TFDS_IMAGES_TO_SCAN ({MAX_TFDS_IMAGES_TO_SCAN}). Stopping scan.")
+                break
+            if total_images_saved_so_far >= total_images_to_select:
+                # This condition means all categories have met their target
+                all_filled = all(images_saved_count[cat] >= TARGET_IMAGES_PER_BROAD_CATEGORY for cat in broad_categories_list)
+                if all_filled:
+                    print(f"\nAll broad categories have reached their target of {TARGET_IMAGES_PER_BROAD_CATEGORY} images.")
+                    break
+
+            fine_numeric_label = item_tfds['label'].numpy()
+            original_tfds_idx = original_tfds_idx_tensor.numpy() # For unique filenames
+
+            if 0 <= fine_numeric_label < num_fine_classes:
+                fine_label_name = fine_label_names[fine_numeric_label]
+                if fine_label_name in fine_to_broad_mapping:
+                    broad_cat_name = fine_to_broad_mapping[fine_label_name]
+                    
+                    # Check if this broad category still needs more images
+                    if images_saved_count.get(broad_cat_name, 0) < TARGET_IMAGES_PER_BROAD_CATEGORY:
+                        image_numpy = item_tfds['image'].numpy()
+                        pil_image = Image.fromarray(image_numpy).convert('RGB')
+                        
+                        # Create a unique filename
+                        # Sanitize fine_label_name for use in filename
+                        sanitized_fine_label = fine_label_name.replace('/', '_').replace(' ', '_')
+                        image_filename = f"idx{original_tfds_idx}_{sanitized_fine_label}.jpg"
+                        
+                        category_image_dir = os.path.join(BOVW_RAW_IMAGE_DATA_DIR, broad_cat_name)
+                        image_save_path = os.path.join(category_image_dir, image_filename)
+
+                        try:
+                            pil_image.save(image_save_path)
+                            collected_items_by_category[broad_cat_name].append({
+                                'image_path': image_save_path,
+                                'broad_category_name': broad_cat_name # Store name for stratification
+                            })
+                            images_saved_count[broad_cat_name] += 1
+                            total_images_saved_so_far += 1
+                            pbar.set_postfix({cat: count for cat, count in images_saved_count.items()})
+                        except Exception as e:
+                            pbar.write(f"Error saving image {image_filename} (idx {original_tfds_idx}): {e}")
+                            continue # Skip this image if saving fails
+                # else: fine_label_name was not mapped (e.g., if definition is incomplete)
+            # else: invalid fine_numeric_label (should be rare)
+
+    print("\n--- Image Selection and Saving Summary ---")
+    all_categories_filled = True
+    for broad_cat in broad_categories_list:
+        count = images_saved_count[broad_cat]
+        print(f"Category '{broad_cat}': Saved {count} images (Target: {TARGET_IMAGES_PER_BROAD_CATEGORY})")
+        if count < TARGET_IMAGES_PER_BROAD_CATEGORY:
+            all_categories_filled = False
+            print(f"  WARNING: Category '{broad_cat}' did not reach the target. Consider increasing MAX_TFDS_IMAGES_TO_SCAN or check category definition abundance in Places365.")
+
+    if not all_categories_filled:
+        print("WARNING: Not all categories reached their target counts.")
+    print(f"Total images saved across all categories: {total_images_saved_so_far}")
+
+    if total_images_saved_so_far == 0:
+        print("ERROR: No images were saved. Check mappings, paths, and TFDS scan logic.")
         exit()
-    print(f"Successfully mapped {len(mapped_broad_labels_str_list)} images to broad categories.")
+
+    # --- 4. Prepare for Train/Test Split using Image Paths ---
+    # Consolidate all collected items (dictionaries of 'image_path' and 'broad_category_name')
+    all_selected_items_for_split = []
+    for broad_cat_name in broad_categories_list:
+        all_selected_items_for_split.extend(collected_items_by_category[broad_cat_name])
+
+    # Shuffle this consolidated list before splitting to ensure randomness in train/test
+    # (and that images from different categories are mixed)
+    np.random.seed(RANDOM_SEED)
+    np.random.shuffle(all_selected_items_for_split)
+
+    # Extract the image paths and string labels for splitting
+    split_image_paths = [item['image_path'] for item in all_selected_items_for_split]
+    split_labels_str = [item['broad_category_name'] for item in all_selected_items_for_split]
 
     # --- 5. Encode Broad Category String Labels to Numeric Labels ---
     print("\nEncoding broad category string labels to numeric labels...")
     label_encoder = LabelEncoder()
+    # Fit the encoder on the predefined 'broad_categories_list' to ensure consistent ordering
     label_encoder.fit(broad_categories_list)
-    numeric_broad_labels = label_encoder.transform(mapped_broad_labels_str_list)
+    numeric_broad_labels_for_split = label_encoder.transform(split_labels_str)
+
     print("Broad Category String to Numeric Mapping (based on LabelEncoder):")
-    for i, class_name in enumerate(label_encoder.classes_):
-        print(f"  {class_name}: {i}")
+    for i, class_name_le in enumerate(label_encoder.classes_):
+        print(f"  '{class_name_le}': {i}")
 
     # --- 6. Create Train/Test Split ---
-    print("\nCreating train/test split...")
-    train_indices, test_indices, \
+    print("\nCreating train/test split (stratified by numeric broad labels)...")
+    # We are splitting the `split_image_paths`
+    train_image_paths, test_image_paths, \
     train_broad_labels_numeric, test_broad_labels_numeric, \
     train_broad_labels_str, test_broad_labels_str = train_test_split(
-        valid_indices_for_split_list,
-        numeric_broad_labels,
-        mapped_broad_labels_str_list,
-        test_size=0.2,
-        random_state=RANDOM_SEED,
-        stratify=numeric_broad_labels
+        split_image_paths,                # These are the paths to images saved in BOVW_RAW_IMAGE_DATA_DIR
+        numeric_broad_labels_for_split,   # Numeric labels for stratification
+        split_labels_str,                 # String labels (for reference in NPZ)
+        test_size=0.2,                    # Standard 80/20 split
+        random_state=RANDOM_SEED,         # Use the same seed for reproducible splits
+        stratify=numeric_broad_labels_for_split  # Ensure class balance based on numeric labels
     )
-    print(f"Training set size: {len(train_indices)} images")
-    print(f"Test set size: {len(test_indices)} images")
-    print("\nTrain broad label distribution (numeric):", np.bincount(train_broad_labels_numeric, minlength=len(label_encoder.classes_)))
-    print("Test broad label distribution (numeric):", np.bincount(test_broad_labels_numeric, minlength=len(label_encoder.classes_)))
-    for i, class_name in enumerate(label_encoder.classes_):
-        train_count = np.sum(train_broad_labels_numeric == i)
-        test_count = np.sum(test_broad_labels_numeric == i)
-        print(f"  Category '{class_name}' (ID {i}): Train={train_count}, Test={test_count}")
+    print(f"Training set size: {len(train_image_paths)} image paths")
+    print(f"Test set size: {len(test_image_paths)} image paths")
 
-    # --- 7. Save the Splits and Label Encoder ---
-    output_splits_dir = os.path.join(OUTPUT_FEATURES_DIR, "train_test_splits_4cat_revised")
-    os.makedirs(output_splits_dir, exist_ok=True)
-    split_data_file = os.path.join(output_splits_dir, "train_test_split_data_4cat_revised.npz")
-    label_encoder_file = os.path.join(output_splits_dir, "broad_label_encoder_4cat_revised.pkl")
-    np.savez(
-        split_data_file,
-        train_indices=np.array(train_indices), test_indices=np.array(test_indices),
-        train_labels_numeric=train_broad_labels_numeric, test_labels_numeric=test_broad_labels_numeric,
-        train_labels_str=np.array(train_broad_labels_str), test_labels_str=np.array(test_broad_labels_str)
+    print("\nTrain broad label distribution (numeric):")
+    train_counts = np.bincount(train_broad_labels_numeric, minlength=len(label_encoder.classes_))
+    for i, class_name_le in enumerate(label_encoder.classes_): print(f"  '{class_name_le}' (ID {i}): {train_counts[i]}")
+    
+    print("Test broad label distribution (numeric):")
+    test_counts = np.bincount(test_broad_labels_numeric, minlength=len(label_encoder.classes_))
+    for i, class_name_le in enumerate(label_encoder.classes_): print(f"  '{class_name_le}' (ID {i}): {test_counts[i]}")
+
+
+    # --- 7. Save the Splits (Image Paths and Labels) and Label Encoder ---
+    split_data_file_bovw = os.path.join(OUTPUT_SPLITS_INFO_DIR_BOVW, f"bovw_train_test_paths_N{total_images_saved_so_far}_S{RANDOM_SEED}.npz")
+    label_encoder_file_bovw = os.path.join(OUTPUT_SPLITS_INFO_DIR_BOVW, f"bovw_label_encoder_N{total_images_saved_so_far}_S{RANDOM_SEED}.pkl")
+
+    np.savez_compressed( # Use compressed to save space if many paths
+        split_data_file_bovw,
+        train_image_paths=np.array(train_image_paths, dtype=object), # Save image paths
+        test_image_paths=np.array(test_image_paths, dtype=object),   # Save image paths
+        train_labels_numeric=train_broad_labels_numeric.astype(np.int8),
+        test_labels_numeric=test_broad_labels_numeric.astype(np.int8),
+        train_labels_str=np.array(train_broad_labels_str, dtype=object), # For inspection
+        test_labels_str=np.array(test_broad_labels_str, dtype=object)    # For inspection
     )
-    print(f"\nSaved train/test indices and labels to: {split_data_file}")
-    with open(label_encoder_file, 'wb') as f:
+    print(f"\nSaved BoVW train/test image paths and labels to: {split_data_file_bovw}")
+
+    with open(label_encoder_file_bovw, 'wb') as f:
         pickle.dump(label_encoder, f)
-    print(f"Saved label encoder to: {label_encoder_file}")
-    print("\n--- Data Preparation (Labels & Splits for 4 Categories) Complete ---")
+    print(f"Saved BoVW label encoder to: {label_encoder_file_bovw}")
+
+    print("\n--- Balanced Data Preparation for BoVW Complete ---")
+    print(f"Selected raw images for BoVW are saved in subdirectories within: {BOVW_RAW_IMAGE_DATA_DIR}")
+    print(f"The NPZ file '{split_data_file_bovw}' contains lists of these image paths for your BoVW train/test sets.")
+    print("Your BoVW pipeline should now load these image paths to process the images.")

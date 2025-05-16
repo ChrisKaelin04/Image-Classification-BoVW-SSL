@@ -1,135 +1,160 @@
+# build_vocabulary_vanilla_balanced.py
 import os
 import pickle
 import numpy as np
 import glob
 from tqdm import tqdm
-# *** Import MiniBatchKMeans ***
 from sklearn.cluster import MiniBatchKMeans
-import joblib # Keep for potential model saving later
+import joblib
+import gc
 
-# --- Configuration ---
-FEATURES_DIR = "E:\CV_features"
-FEATURE_TYPE = 'orb'
-BATCHES_SUBDIR = 'orb_batches'
-OUTPUT_VOCAB_FILE = os.path.join(FEATURES_DIR, f'{FEATURE_TYPE}_vocabulary_k1000_partial_fit.pkl')
-OUTPUT_KMEANS_MODEL_FILE = os.path.join(FEATURES_DIR, f'{FEATURE_TYPE}_kmeans_model_k1000_partial_fit.joblib') # Optional
+# --- Configuration (can be arguments to the main function) ---
+DEFAULT_VANILLA_FEATURES_RAW_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features"
+DEFAULT_VOCABULARY_SIZE = 1000
+DEFAULT_MINIBATCH_KMEANS_INTERNAL_BATCH_SIZE = 1024 * 4
+DEFAULT_RANDOM_SEED = 42
+DEFAULT_KMEANS_N_INIT = 1
 
-# --- K-Means Parameters ---
-VOCABULARY_SIZE = 1000 # (k) Number of visual words
-# MiniBatchKMeans specific parameter used by partial_fit internally if data is large,
-# but we control the batch size by how much we feed to partial_fit.
-# Set a reasonable batch_size for internal calculations if needed.
-MINIBATCH_SIZE = 1024 * 4 # Example: 4096 (Less critical now, as we feed external batches)
-RANDOM_SEED = 42
+def _build_single_feature_type_vocabulary(
+    feature_type_to_process,
+    vanilla_features_raw_dir,
+    vocabulary_size,
+    minibatch_kmeans_internal_batch_size,
+    random_seed,
+    kmeans_n_init
+):
+    """
+    Internal helper function to build vocabulary for a single feature type.
+    Returns True on success, False on failure.
+    """
+    print(f"\n--- Building Vocabulary for {feature_type_to_process.upper()} (Vanilla BoVW - Balanced Training Data) ---")
 
+    descriptor_batches_subdir_name = f'{feature_type_to_process}_descriptors_batches'
+    input_descriptor_batches_path = os.path.join(vanilla_features_raw_dir, descriptor_batches_subdir_name)
 
-def build_vocab_KMeans():
-    print(f"--- Starting K-Means Vocabulary Creation for {FEATURE_TYPE} using MiniBatchKMeans.partial_fit ---")
-    print(f"Loading descriptors iteratively from: {os.path.join(FEATURES_DIR, BATCHES_SUBDIR)}")
-    print(f"Target vocabulary size (k): {VOCABULARY_SIZE}")
+    output_base_filename_part = f"{feature_type_to_process}_vanilla_balanced_k{vocabulary_size}_train"
+    output_vocab_file = os.path.join(vanilla_features_raw_dir, f"{output_base_filename_part}_vocabulary.pkl")
+    output_kmeans_model_file = os.path.join(vanilla_features_raw_dir, f"{output_base_filename_part}_kmeans_model.joblib")
 
-    # Set seed for reproducibility if MiniBatchKMeans uses it for internal shuffling/sampling
-    np.random.seed(RANDOM_SEED)
-    # random.seed(RANDOM_SEED) # Less critical now we aren't doing the big sampling step
+    print(f"Source: {input_descriptor_batches_path}")
+    print(f"Vocab K: {vocabulary_size}")
+    print(f"Output Vocab PKL: {output_vocab_file}")
+    print(f"Output KMeans Joblib: {output_kmeans_model_file}")
 
-    batch_files = sorted(glob.glob(os.path.join(FEATURES_DIR, BATCHES_SUBDIR, f'{FEATURE_TYPE}_batch_*.pkl')))
+    np.random.seed(random_seed)
 
-    if not batch_files:
-        print(f"Error: No batch files found in {os.path.join(FEATURES_DIR, BATCHES_SUBDIR)}")
-        exit()
+    batch_files_pattern_regular = os.path.join(input_descriptor_batches_path, f'{feature_type_to_process}_descriptors_train_batch_*.pkl')
+    train_batch_files = sorted(glob.glob(batch_files_pattern_regular))
 
-    print(f"Found {len(batch_files)} batch files to process.")
+    if not train_batch_files:
+        print(f"Error: No TRAINING SET descriptor batch files found for {feature_type_to_process.upper()} in {input_descriptor_batches_path}")
+        print(f"Searched for pattern: '{batch_files_pattern_regular}'")
+        return False
 
-    # --- Initialize MiniBatchKMeans ---
-    # Initialize the model *before* the loop.
-    # Use n_init=1 because partial_fit updates a single model incrementally.
-    # It doesn't run multiple initializations like fit() does with n_init='auto' or > 1.
-    print(f"Initializing MiniBatchKMeans model with k={VOCABULARY_SIZE}...")
-    kmeans = MiniBatchKMeans(n_clusters=VOCABULARY_SIZE,
-                            random_state=RANDOM_SEED,
-                            batch_size=MINIBATCH_SIZE, # Used for internal processing if needed
-                            n_init=1, # CRITICAL: Must be 1 for partial_fit
-                            max_iter=100, # Max iterations *per partial_fit call* (usually low is fine)
-                            # tol=1e-4, # Tolerance check might be less useful with partial_fit
-                            verbose=1, # Print progress updates from MiniBatchKMeans
-                            compute_labels=False # Don't need labels during training, saves memory/time
-                            )
+    print(f"Found {len(train_batch_files)} TRAINING batch files for {feature_type_to_process.upper()}.")
 
-    # --- Iteratively Train with partial_fit ---
-    print(f"Starting iterative training using partial_fit over {len(batch_files)} batches...")
+    kmeans_model = MiniBatchKMeans(
+        n_clusters=vocabulary_size,
+        random_state=random_seed,
+        batch_size=minibatch_kmeans_internal_batch_size,
+        n_init=kmeans_n_init,
+        max_iter=100,
+        verbose=0, # Changed to 0 for cleaner loop output, tqdm handles progress
+        compute_labels=False
+    )
+
     total_descriptors_processed = 0
-
-    # Loop through each saved batch file
-    # Wrap the loop with tqdm for progress bar over the files
-    for batch_file in tqdm(batch_files, desc="Processing batches"):
+    print(f"Starting iterative K-Means training (partial_fit)...")
+    for batch_file_path in tqdm(train_batch_files, desc=f"Fitting {feature_type_to_process.upper()}"):
         try:
-            with open(batch_file, 'rb') as f:
-                batch_data = pickle.load(f)
+            with open(batch_file_path, 'rb') as f:
+                list_of_descriptor_arrays_in_batch = pickle.load(f)
+            if not list_of_descriptor_arrays_in_batch: continue
 
-            # Collect descriptors ONLY from the current batch
-            current_batch_descriptors = []
-            for idx, descriptors in batch_data.items():
-                if descriptors is not None and descriptors.shape[0] > 0:
-                    current_batch_descriptors.append(descriptors)
+            valid_descriptors = [d for d in list_of_descriptor_arrays_in_batch if d is not None and d.shape[0] > 0]
+            if not valid_descriptors: continue
+            
+            current_batch_np = np.vstack(valid_descriptors)
+            
+            if current_batch_np.dtype != np.float32:
+                current_batch_np = current_batch_np.astype(np.float32)
+            
+            if current_batch_np.size == 0: continue
 
-            if not current_batch_descriptors:
-                # print(f"No descriptors found in {batch_file}, skipping.") # Optional: reduce noise
-                continue # Skip empty batches
+            total_descriptors_processed += current_batch_np.shape[0]
+            kmeans_model.partial_fit(current_batch_np)
 
-            # Concatenate descriptors *from this batch only*
-            # Memory usage is now limited to the size of one batch + model
-            batch_np = np.vstack(current_batch_descriptors).astype(np.float32) # Ensure float32
-            total_descriptors_processed += batch_np.shape[0]
-
-            # Train the model on this batch
-            kmeans.partial_fit(batch_np)
-
-            # Optional: Clear memory explicitly (might help on some systems)
-            del batch_data
-            del current_batch_descriptors
-            del batch_np
-
-        except FileNotFoundError:
-            print(f"\nWarning: Batch file not found: {batch_file}")
-        except pickle.UnpicklingError:
-            print(f"\nWarning: Could not unpickle file: {batch_file}")
-        except MemoryError:
-            print(f"\nError: Ran out of memory while processing batch: {batch_file}.")
-            print("This single batch might be too large for available RAM.")
-            # Consider re-running feature extraction with smaller BATCH_SAVE_SIZE if this occurs
-            exit()
+            del list_of_descriptor_arrays_in_batch, current_batch_np, valid_descriptors; gc.collect()
         except Exception as e:
-            print(f"\nWarning: An error occurred processing {batch_file}: {e}")
+            tqdm.write(f"Warning processing batch {batch_file_path}: {e}. Skipping.")
+            continue
 
+    print(f"K-Means training complete. Processed {total_descriptors_processed} {feature_type_to_process.upper()} descriptors.")
 
-    print(f"\nK-Means partial_fit training complete. Processed {total_descriptors_processed} descriptors.")
-
-    # --- Get Vocabulary (Cluster Centers) ---
-    # The centers are now trained based on all the data fed via partial_fit
-    print("Extracting final cluster centers (vocabulary)...")
-    if hasattr(kmeans, 'cluster_centers_'):
-        vocabulary = kmeans.cluster_centers_
-        print(f"Vocabulary shape: {vocabulary.shape}") # Should be (VOCABULARY_SIZE, 128)
-
-        # --- Save Vocabulary ---
-        print(f"Saving vocabulary to: {OUTPUT_VOCAB_FILE}")
+    if hasattr(kmeans_model, 'cluster_centers_') and kmeans_model.cluster_centers_ is not None and \
+       kmeans_model.cluster_centers_.shape[0] == vocabulary_size:
+        vocabulary = kmeans_model.cluster_centers_
+        print(f"Vocabulary shape: {vocabulary.shape}")
+        os.makedirs(os.path.dirname(output_vocab_file), exist_ok=True)
         try:
-            with open(OUTPUT_VOCAB_FILE, 'wb') as f:
-                pickle.dump(vocabulary, f)
-        except Exception as e:
-            print(f"Error saving vocabulary file: {e}")
-
-
-        # Optional: Save the entire fitted KMeans model
-        # Useful if you want to predict cluster indices later without retraining
-        print(f"Saving KMeans model object to: {OUTPUT_KMEANS_MODEL_FILE}")
+            with open(output_vocab_file, 'wb') as f: pickle.dump(vocabulary, f)
+            print(f"Saved vocabulary: {output_vocab_file}")
+        except Exception as e: print(f"Error saving vocab PKL: {e}")
         try:
-            joblib.dump(kmeans, OUTPUT_KMEANS_MODEL_FILE)
-            print(f"Successfully saved KMeans model to {OUTPUT_KMEANS_MODEL_FILE}")
-        except Exception as e:
-            print(f"Error saving KMeans model object: {e}")
-
-
-        print("--- Vocabulary creation finished successfully! ---")
+            joblib.dump(kmeans_model, output_kmeans_model_file)
+            print(f"Saved KMeans model: {output_kmeans_model_file}")
+        except Exception as e: print(f"Error saving KMeans Joblib: {e}")
+        print(f"--- {feature_type_to_process.upper()} Vocabulary built successfully. ---")
+        return True
     else:
-        print("Error: KMeans model does not have cluster_centers_ attribute. Training might have failed.")
+        shape_info = kmeans_model.cluster_centers_.shape if hasattr(kmeans_model, 'cluster_centers_') and kmeans_model.cluster_centers_ is not None else 'None'
+        print(f"Error: {feature_type_to_process.upper()} KMeans model cluster_centers_ issue. Expected {vocabulary_size}, got shape: {shape_info}.")
+        return False
+
+def build_all_vanilla_bovw_vocabularies(
+    vanilla_features_raw_dir=DEFAULT_VANILLA_FEATURES_RAW_DIR,
+    vocabulary_size=DEFAULT_VOCABULARY_SIZE,
+    minibatch_kmeans_internal_batch_size=DEFAULT_MINIBATCH_KMEANS_INTERNAL_BATCH_SIZE,
+    random_seed=DEFAULT_RANDOM_SEED,
+    kmeans_n_init=DEFAULT_KMEANS_N_INIT,
+    feature_types_to_process=['sift', 'orb']
+):
+    """
+    Builds and saves vocabularies for specified feature types (e.g., SIFT, ORB)
+    for the vanilla Bag of Visual Words model using balanced training data.
+
+    Args:
+        vanilla_features_raw_dir (str): Path to the directory containing descriptor batch subdirectories
+                                       (e.g., 'sift_descriptors_batches', 'orb_descriptors_batches').
+        vocabulary_size (int): The number of visual words (k) for KMeans.
+        minibatch_kmeans_internal_batch_size (int): Internal batch size for MiniBatchKMeans.
+        random_seed (int): Seed for reproducibility.
+        kmeans_n_init (int): n_init parameter for MiniBatchKMeans (typically 1 for partial_fit).
+        feature_types_to_process (list): List of strings, e.g., ['sift', 'orb'].
+    """
+    print("=" * 70)
+    print("Starting All Vanilla BoVW Vocabulary Building (Balanced Data)")
+    print(f"Reading raw descriptor batches from: {vanilla_features_raw_dir}")
+    print("=" * 70)
+
+    overall_success = True
+    for ft_type in feature_types_to_process:
+        success = _build_single_feature_type_vocabulary(
+            feature_type_to_process=ft_type,
+            vanilla_features_raw_dir=vanilla_features_raw_dir,
+            vocabulary_size=vocabulary_size,
+            minibatch_kmeans_internal_batch_size=minibatch_kmeans_internal_batch_size,
+            random_seed=random_seed,
+            kmeans_n_init=kmeans_n_init
+        )
+        if not success:
+            print(f"!!! Vocabulary building FAILED for {ft_type.upper()} !!!")
+            overall_success = False
+        print("-" * 70)
+    
+    if overall_success:
+        print("All specified Vanilla BoVW vocabularies built successfully.")
+    else:
+        print("One or more Vanilla BoVW vocabulary building processes failed. Please check logs.")
+    print("=" * 70)
+    return overall_success

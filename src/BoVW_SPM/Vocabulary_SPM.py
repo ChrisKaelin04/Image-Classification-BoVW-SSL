@@ -1,4 +1,4 @@
-# build_vocabulary_spm_refactored.py
+# build_vocabulary_spm_balanced.py
 import os
 import pickle
 import numpy as np
@@ -6,175 +6,162 @@ import glob
 from tqdm import tqdm
 from sklearn.cluster import MiniBatchKMeans
 import joblib
-import gc # Added for explicit garbage collection
+import gc
 
-# --- Configuration for SPM Vocabulary ---
-FEATURES_SPM_DIR = "E:\CV_features_SPM" # Main directory for SPM features
+# --- Configuration for SPM Vocabulary (from BALANCED features) ---
+# This should be the output directory of SOH_extract_SPM_balanced.py
+FEATURES_SPM_BALANCED_DIR = r"E:\CV_features_SPM_balanced"
 
-# --- K-Means Parameters (should be consistent) ---
+# --- K-Means Parameters ---
 VOCABULARY_SIZE = 1000  # (k) Number of visual words
-MINIBATCH_SIZE = 1024 * 4 # Internal batch size for MiniBatchKMeans
+MINIBATCH_KMEANS_BATCH_SIZE = 1024 * 4 # Internal batch size for MiniBatchKMeans updates
 RANDOM_SEED = 42
+KMEANS_N_INIT = 10 # Number of initializations for MiniBatchKMeans
 
-# --- K-Means Training Parameters ---
-KMEANS_N_INIT = 10 # IMPORTANT: Number of times MiniBatchKMeans is run with different centroid seeds.
-                   # Increase for potentially better clustering results, but increases computation time.
-                   # Must be > 0. For partial_fit, n_init=1 is often used if initial centroids are fixed,
-                   # but for random seeds, >1 is better practice for quality.
-
-
-def build_single_vocab_for_feature_type(feature_type_to_process):
+def build_single_vocab_for_feature_type_balanced(feature_type_to_process):
     """
     Builds the K-Means vocabulary for a single specified feature type (e.g., 'sift' or 'orb')
-    using SPM-structured batch files.
+    using BALANCED SPM-structured batch files FROM THE TRAINING SET ONLY.
     """
-    print(f"\n--- Starting K-Means Vocabulary Creation for {feature_type_to_process.upper()} (SPM Batches) ---")
+    print(f"\n--- Starting K-Means Vocabulary Creation for {feature_type_to_process.upper()} (Balanced SPM - TRAINING SET ONLY) ---")
 
-    # Derive paths based on feature_type_to_process
-    batches_subdir = f'{feature_type_to_process}_batches_spm'
-    input_batches_path = os.path.join(FEATURES_SPM_DIR, batches_subdir)
-    output_vocab_file = os.path.join(FEATURES_SPM_DIR, f'{feature_type_to_process}_vocabulary_spm_k{VOCABULARY_SIZE}_partial_fit.pkl')
-    output_kmeans_model_file = os.path.join(FEATURES_SPM_DIR, f'{feature_type_to_process}_kmeans_model_spm_k{VOCABULARY_SIZE}_partial_fit.joblib')
+    batches_subdir = f'{feature_type_to_process}_batches_spm' # e.g., 'sift_batches_spm'
+    # IMPORTANT: Only use TRAINING set batches for vocabulary building
+    input_batches_path = os.path.join(FEATURES_SPM_BALANCED_DIR, batches_subdir)
 
-    print(f"Loading descriptors iteratively from: {input_batches_path}")
+    # Output files will reflect that they are from balanced data and training set
+    output_vocab_file = os.path.join(FEATURES_SPM_BALANCED_DIR, f'{feature_type_to_process}_vocabulary_spm_balanced_k{VOCABULARY_SIZE}_train.pkl')
+    output_kmeans_model_file = os.path.join(FEATURES_SPM_BALANCED_DIR, f'{feature_type_to_process}_kmeans_model_spm_balanced_k{VOCABULARY_SIZE}_train.joblib')
+
+    print(f"Loading TRAINING descriptors iteratively from: {input_batches_path}")
     print(f"Target vocabulary size (k): {VOCABULARY_SIZE}")
     print(f"MiniBatchKMeans n_init: {KMEANS_N_INIT}")
 
+    np.random.seed(RANDOM_SEED)
 
-    np.random.seed(RANDOM_SEED) # Seed for MiniBatchKMeans reproducibility *across runs*
+    # Glob pattern to find ONLY TRAINING set batch files
+    # Names from SOH_extract_SPM_balanced.py:
+    # e.g., sift_spm_train_batch_0.pkl, sift_spm_train_final_batch_processedXXXX.pkl
+    batch_files_pattern_regular = os.path.join(input_batches_path, f'{feature_type_to_process}_spm_train_batch_*.pkl')
+    batch_files_pattern_final = os.path.join(input_batches_path, f'{feature_type_to_process}_spm_train_final_batch_processed*.pkl')
+    
+    train_batch_files_spm = sorted(glob.glob(batch_files_pattern_regular) + glob.glob(batch_files_pattern_final))
 
-    # Use glob to find batch files, ensure sorted order for consistent processing
-    batch_files_spm = sorted(glob.glob(os.path.join(input_batches_path, f'{feature_type_to_process}_spm_batch_*.pkl')) +
-                             glob.glob(os.path.join(input_batches_path, f'{feature_type_to_process}_spm_final_batch_processed*.pkl'))) # Include final batch
-
-    if not batch_files_spm:
-        print(f"Error: No SPM batch files found for {feature_type_to_process.upper()} in {input_batches_path}")
+    if not train_batch_files_spm:
+        print(f"Error: No TRAINING SET SPM batch files found for {feature_type_to_process.upper()} in {input_batches_path}")
+        print(f"Searched for patterns: '{batch_files_pattern_regular}' and '{batch_files_pattern_final}'")
         return False
 
-    print(f"Found {len(batch_files_spm)} SPM batch files to process for {feature_type_to_process.upper()}.")
+    print(f"Found {len(train_batch_files_spm)} TRAINING SET SPM batch files to process for {feature_type_to_process.upper()}.")
 
     print(f"Initializing MiniBatchKMeans model with k={VOCABULARY_SIZE}...")
-    # NOTE: With partial_fit, n_init>1 runs n_init separate initializations.
-    # Subsequent calls to partial_fit continue training the best initialization found so far.
-    kmeans_model = MiniBatchKMeans(n_clusters=VOCABULARY_SIZE,
-                                   random_state=RANDOM_SEED, # Seed applies to centroid initialization
-                                   batch_size=MINIBATCH_SIZE,
-                                   n_init=KMEANS_N_INIT,     # Changed from 1 to KMEANS_N_INIT
-                                   max_iter=100, # Iterations within each partial_fit call
-                                   verbose=1, # Set to 0 for less output during training
-                                   compute_labels=False) # Don't compute labels in partial_fit for efficiency
+    kmeans_model = MiniBatchKMeans(
+        n_clusters=VOCABULARY_SIZE,
+        random_state=RANDOM_SEED,
+        batch_size=MINIBATCH_KMEANS_BATCH_SIZE,
+        n_init=KMEANS_N_INIT,
+        max_iter=100, # Iterations within each partial_fit call
+        verbose=1,
+        compute_labels=False # More efficient for partial_fit if labels aren't needed during training
+    )
 
-
-    print(f"Starting iterative training using partial_fit over {len(batch_files_spm)} SPM batches for {feature_type_to_process.upper()}...")
+    print(f"Starting iterative training using partial_fit over {len(train_batch_files_spm)} TRAINING {feature_type_to_process.upper()} SPM batches...")
     total_descriptors_processed = 0
 
-    for i, batch_file in enumerate(tqdm(batch_files_spm, desc=f"Processing {feature_type_to_process.upper()} SPM batches")):
+    for i, batch_file in enumerate(tqdm(train_batch_files_spm, desc=f"Processing TRAINING {feature_type_to_process.upper()} SPM batches")):
         try:
             with open(batch_file, 'rb') as f:
+                # batch_data_spm is a dict: {image_path: {'descriptors': ..., 'coordinates': ..., ...}}
                 batch_data_spm = pickle.load(f)
 
-            current_batch_descriptors = []
-            # Iterate through values (the dictionaries per image) in the batch data
-            for image_info_dict in batch_data_spm.values():
+            current_batch_descriptors_list = []
+            for image_path, image_info_dict in batch_data_spm.items(): # Iterate items to get path if needed for debug
                 descriptors = image_info_dict.get('descriptors')
                 if descriptors is not None and descriptors.shape[0] > 0:
-                    current_batch_descriptors.append(descriptors)
+                    current_batch_descriptors_list.append(descriptors)
 
-            if not current_batch_descriptors:
-                print(f"\nWarning: No descriptors found in batch file: {batch_file}. Skipping.")
+            if not current_batch_descriptors_list:
+                tqdm.write(f"Warning: No descriptors found in training batch file: {batch_file}. Skipping.")
                 continue
 
-            # Stack descriptors from all images in the current batch into a single numpy array
-            # NOTE: This np.vstack can cause MemoryError if a single batch is too large.
-            # If OOM occurs here, reduce BATCH_SAVE_SIZE in SOH_extract_SPM and re-extract features.
-            batch_np = None
+            batch_np_descriptors = None
             try:
-                # Handle dtype conversion before stacking
-                if feature_type_to_process == 'orb':
-                    # Stack as uint8 first, then convert to float32 for KMeans
-                    stacked_descriptors = np.vstack(current_batch_descriptors)
-                    batch_np = stacked_descriptors.astype(np.float32)
-                else: # Assuming SIFT or other float descriptors (should be float32 from extraction)
-                    stacked_descriptors = np.vstack(current_batch_descriptors)
+                if feature_type_to_process == 'orb': # ORB descriptors are uint8
+                    stacked_descriptors = np.vstack(current_batch_descriptors_list)
+                    batch_np_descriptors = stacked_descriptors.astype(np.float32) # KMeans expects float
+                else: # SIFT descriptors should already be float32
+                    stacked_descriptors = np.vstack(current_batch_descriptors_list)
                     if stacked_descriptors.dtype != np.float32:
-                         print(f"\nWarning: Expected {feature_type_to_process.upper()} descriptors to be float32, found {stacked_descriptors.dtype} in {batch_file}. Converting.")
-                         batch_np = stacked_descriptors.astype(np.float32)
+                        tqdm.write(f"Warning: Expected {feature_type_to_process.upper()} descriptors to be float32, "
+                                   f"found {stacked_descriptors.dtype} in {batch_file}. Converting.")
+                        batch_np_descriptors = stacked_descriptors.astype(np.float32)
                     else:
-                         batch_np = stacked_descriptors
-
+                        batch_np_descriptors = stacked_descriptors
             except MemoryError:
-                 print(f"\nCritical Error: Ran out of memory while stacking descriptors from batch: {batch_file}.")
-                 print("Try reducing BATCH_SAVE_SIZE in the feature extraction script.")
-                 return False # Critical error, stop for this feature type
+                tqdm.write(f"CRITICAL Error: Ran out of memory while stacking descriptors from batch: {batch_file}.")
+                tqdm.write("Try reducing BATCH_SAVE_SIZE in SOH_extract_SPM_balanced.py and re-extract features.")
+                return False
             except Exception as e:
-                 print(f"\nWarning: An error occurred during stacking/dtype conversion for batch {batch_file}: {e}. Skipping batch.")
-                 # print(traceback.format_exc()) # Uncomment for detailed error
-                 continue # Skip this batch but continue with others
+                tqdm.write(f"Warning: An error occurred during stacking/dtype conversion for batch {batch_file}: {e}. Skipping batch.")
+                continue
 
-            if batch_np is None or batch_np.size == 0:
-                 print(f"\nWarning: Stacked batch data is empty or None after processing {batch_file}. Skipping.")
-                 continue
+            if batch_np_descriptors is None or batch_np_descriptors.size == 0:
+                tqdm.write(f"Warning: Stacked batch data is empty or None after processing {batch_file}. Skipping.")
+                continue
 
+            total_descriptors_processed += batch_np_descriptors.shape[0]
+            kmeans_model.partial_fit(batch_np_descriptors)
 
-            total_descriptors_processed += batch_np.shape[0]
-            # Perform partial_fit on the stacked descriptors from the current batch
-            kmeans_model.partial_fit(batch_np)
-
-
-            # Explicit cleanup after processing each batch
-            del batch_data_spm, current_batch_descriptors, batch_np
+            del batch_data_spm, current_batch_descriptors_list, batch_np_descriptors
             if 'stacked_descriptors' in locals(): del stacked_descriptors
-            gc.collect() # Request garbage collection
+            gc.collect()
 
         except FileNotFoundError:
-            print(f"\nWarning: SPM Batch file not found: {batch_file}. Skipping.")
+            tqdm.write(f"Warning: SPM Batch file not found: {batch_file}. Skipping.")
         except pickle.UnpicklingError:
-            print(f"\nWarning: Could not unpickle SPM file: {batch_file}. Skipping.")
+            tqdm.write(f"Warning: Could not unpickle SPM file: {batch_file}. Skipping.")
         except Exception as e:
-            print(f"\nWarning: An unexpected error occurred processing batch {batch_file}: {e}. Skipping batch.")
-            # print(traceback.format_exc()) # Uncomment for detailed error
+            tqdm.write(f"Warning: An unexpected error occurred processing batch {batch_file}: {e}. Skipping batch.")
 
+    print(f"\nK-Means partial_fit training for {feature_type_to_process.upper()} (Balanced SPM - Training Set) complete.")
+    print(f"Processed {total_descriptors_processed} descriptors in total.")
 
-    print(f"\nK-Means partial_fit training for {feature_type_to_process.upper()} (SPM) complete. Processed {total_descriptors_processed} descriptors in total.")
-
-    # Check if clustering was successful
-    if hasattr(kmeans_model, 'cluster_centers_') and kmeans_model.cluster_centers_.shape[0] == VOCABULARY_SIZE:
+    if hasattr(kmeans_model, 'cluster_centers_') and kmeans_model.cluster_centers_ is not None and \
+       kmeans_model.cluster_centers_.shape[0] == VOCABULARY_SIZE:
         vocabulary = kmeans_model.cluster_centers_
         print(f"SPM Vocabulary shape for {feature_type_to_process.upper()}: {vocabulary.shape}")
 
-        # Save the vocabulary (cluster centers)
+        os.makedirs(os.path.dirname(output_vocab_file), exist_ok=True) # Ensure dir exists
         print(f"Saving {feature_type_to_process.upper()} SPM vocabulary to: {output_vocab_file}")
         try:
             with open(output_vocab_file, 'wb') as f: pickle.dump(vocabulary, f)
-            print(f"Successfully saved {feature_type_to_process.upper()} SPM vocabulary.")
         except Exception as e: print(f"Error saving {feature_type_to_process.upper()} SPM vocabulary file: {e}")
 
-        # Save the full KMeans model object
         print(f"Saving {feature_type_to_process.upper()} SPM KMeans model object to: {output_kmeans_model_file}")
         try:
             joblib.dump(kmeans_model, output_kmeans_model_file)
-            print(f"Successfully saved {feature_type_to_process.upper()} SPM KMeans model to {output_kmeans_model_file}")
         except Exception as e: print(f"Error saving {feature_type_to_process.upper()} SPM KMeans model object: {e}")
 
-        print(f"--- {feature_type_to_process.upper()} SPM Vocabulary creation finished successfully! ---")
+        print(f"--- {feature_type_to_process.upper()} SPM Vocabulary (Balanced - Training Set) creation finished successfully! ---")
         return True
     else:
         print(f"Error: {feature_type_to_process.upper()} SPM KMeans model does not have correctly formed cluster_centers_ after training.")
-        print(f"Expected {VOCABULARY_SIZE}, got {kmeans_model.cluster_centers_.shape[0] if hasattr(kmeans_model, 'cluster_centers_') else 'None'}")
+        cluster_shape_info = kmeans_model.cluster_centers_.shape if hasattr(kmeans_model, 'cluster_centers_') and kmeans_model.cluster_centers_ is not None else 'None or not initialized'
+        print(f"Expected {VOCABULARY_SIZE} clusters, got shape: {cluster_shape_info}")
         print("Vocabulary creation failed.")
         return False
 
-
-def build_all_spm_vocabularies():
+def build_all_spm_vocabularies_balanced():
     """
-    Main function to build SPM vocabularies for all specified feature types.
+    Main function to build SPM vocabularies for all specified feature types using balanced training data.
     """
+    print("--- Building All SPM Vocabularies from Balanced Training Data ---")
     feature_types_to_build = ['sift', 'orb'] # List of feature types you want to process
 
     for ft_type in feature_types_to_build:
-        success = build_single_vocab_for_feature_type(ft_type)
+        success = build_single_vocab_for_feature_type_balanced(ft_type)
         if not success:
-            print(f"IMPORTANT: Vocabulary building failed for {ft_type.upper()} (SPM). Please check errors.")
-        print("-" * 50) # Separator
+            print(f"IMPORTANT: Vocabulary building failed for {ft_type.upper()} (Balanced SPM). Please check errors.")
+        print("-" * 50)
 
-    print("\nAll specified SPM vocabulary building attempts finished.")
+    print("\nAll specified SPM vocabulary building attempts (Balanced) finished.")
