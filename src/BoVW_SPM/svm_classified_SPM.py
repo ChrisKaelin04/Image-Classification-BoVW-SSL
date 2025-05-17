@@ -1,11 +1,12 @@
-# SPM_SOH_XGBoost_Classification_balanced.py
+# SPM_SIFT_ORB_XGBoost_Classification_balanced.py
 import numpy as np
 import os
 import pickle
 import warnings
 import joblib
 import glob
-import h5py # Keep h5py import just in case, though we won't use it for HOG batches
+# h5py is not needed as we only load .npy files now
+# import h5py 
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -16,25 +17,15 @@ import xgboost as xgb
 import traceback
 import gc
 
-# --- Configuration for Classification using BALANCED SPM Histograms and HOG Batches ---
+# --- Configuration for Classification using BALANCED SPM Histograms (SIFT and ORB) ---
 
 # Directory where histogram_creation_SPM_balanced.py saved the final .npy feature/label files
-# This is for SIFT and ORB SPM histograms
-SPM_HISTOGRAMS_DIR = r"E:\CV_features_SPM_balanced\spm_histograms_L2_k1000" # Adjust L and K if different
+SPM_HISTOGRAMS_DIR = r"E:\CV_features_SPM_balanced\spm_histograms_L1_k1000" # Adjust L and K if different
 # Example path: E:\CV_features_SPM_balanced\spm_histograms_L1_k1000 (assuming PYRAMID_LEVELS=2, VOCAB_SIZE=1000)
 
-# Directory containing the HOG feature and label batches (.npy files)
-# Assuming this is inside the FEATURES_SPM_BALANCED_DIR
-HOG_BATCH_DIR_RELATIVE = "hog_batches_spm" # Or specify the full path if it's elsewhere
-
-# Label encoder file from the BALANCED splitting script (e.g., create_balanced_split_for_bovw.py)
+# Directory containing the label encoder file from the BALANCED splitting script
 # This is used to get class names.
 BALANCED_SPLITS_INFO_DIR = r"E:\CV_features\bovw_splits_balanced" # Where NPZ and PKL from balanced split are
-FEATURES_SPM_BALANCED_DIR = r"E:\CV_features_SPM_balanced" # This directory will now also house HOG_BATCH_DIR_RELATIVE
-
-# Full path to the HOG batch directory
-HOG_BATCH_DIR = os.path.join(FEATURES_SPM_BALANCED_DIR, HOG_BATCH_DIR_RELATIVE)
-os.makedirs(HOG_BATCH_DIR, exist_ok=True) # Ensure it exists if code was run correctly before
 
 # You need to know which N (total images) and S (seed) was used for the balanced split
 # to pick the correct label encoder. For simplicity, let's assume a fixed name or find one.
@@ -42,18 +33,17 @@ os.makedirs(HOG_BATCH_DIR, exist_ok=True) # Ensure it exists if code was run cor
 # If you have multiple, you'll need to specify which one corresponds to the features you're using.
 LABEL_ENCODER_FILE_PATTERN = os.path.join(BALANCED_SPLITS_INFO_DIR, "bovw_label_encoder_N*_S*.pkl")
 
-
-# Results directory
-RESULTS_DIR_XGB_SPM_BALANCED = r"E:\CV_features_SPM_balanced\classification_results_XGB_SPM_SOH_balanced"
+# Results directory for SPM-only results
+RESULTS_DIR_XGB_SPM_BALANCED = r"E:\CV_features_SPM_balanced\classification_results_XGB_SPM_SIFT_ORB_balanced"
 os.makedirs(RESULTS_DIR_XGB_SPM_BALANCED, exist_ok=True)
 
-# DMatrix cache (can be shared or specific)
-DMATRIX_CACHE_DIR_BALANCED = os.path.join(r"E:\CV_features_SPM_balanced", "xgb_dmatrix_cache_balanced")
+# DMatrix cache (can be shared or specific) for SPM features
+DMATRIX_CACHE_DIR_BALANCED = os.path.join(r"E:\CV_features_SPM_balanced", "xgb_dmatrix_cache_spm_balanced")
 os.makedirs(DMATRIX_CACHE_DIR_BALANCED, exist_ok=True)
 
 # These must match what was used in histogram_creation_SPM_balanced.py to find the .npy files
 VOCAB_SIZE_FOR_LOADING = 1000
-PYRAMID_LEVELS_FOR_LOADING = 3 # L value used in filenames (e.g., L1 if PYRAMID_LEVELS=2)
+PYRAMID_LEVELS_FOR_LOADING = 2 # L value used in filenames (e.g., L1 if PYRAMID_LEVELS=2)
 MAX_LEVEL_INDEX_FOR_LOADING = PYRAMID_LEVELS_FOR_LOADING - 1
 
 
@@ -81,7 +71,7 @@ warnings.filterwarnings("ignore", message="Parameters: {.*use_label_encoder.*} a
 warnings.filterwarnings("ignore", message="omp_set_nested routine deprecated, please use omp_set_max_active_levels instead.", category=UserWarning)
 
 
-# --- Helper Functions (plot_confusion_matrix can remain the same) ---
+# --- Helper Functions (plot_confusion_matrix remains the same) ---
 def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.cm.Blues, results_path=None, filename=None):
     plt.figure(figsize=(max(8, len(classes)), max(6, len(classes)*0.8)))
     sns.heatmap(cm, annot=True, fmt="d", cmap=cmap, xticklabels=classes, yticklabels=classes)
@@ -100,7 +90,7 @@ def plot_confusion_matrix(cm, classes, plot_title='Confusion matrix', cmap=plt.c
     plt.close()
 
 
-# --- Feature Loading Functions ---
+# --- Feature Loading Function (only for SPM) ---
 
 def load_balanced_spm_histograms_and_labels(hist_dir, feature_name_in_file, set_type, L_val, K_val):
     """
@@ -147,9 +137,9 @@ def load_balanced_spm_histograms_and_labels(hist_dir, feature_name_in_file, set_
             return X_features, None # Return features if found, but indicate labels are missing
     else:
         print(f"ERROR: Label file not found: {labels_filepath}")
-        # Fallback: maybe labels are just y_{set_type}_labels.npy in the main balanced features dir?
-        # This depends on how the label file was named by the SPM creation script.
-        # For robustness, let's assume they are specific to the feature+SPM+K+L name first.
+        # If labels are missing specifically for this feature type, maybe they are general?
+        # For this script, let's strictly require the labels to be associated with the feature file pattern.
+        # If labels are indeed stored generally (e.g., y_train_spm_labels.npy), this part needs adjustment.
         return X_features, None
 
     if X_features is not None and y_labels is not None and X_features.shape[0] != y_labels.shape[0]:
@@ -158,73 +148,6 @@ def load_balanced_spm_histograms_and_labels(hist_dir, feature_name_in_file, set_
 
     return X_features, y_labels
 
-
-def load_balanced_hog_from_batches(hog_batch_dir, set_type):
-    """
-    Loads global HOG features and labels from batch .npy files in a directory.
-    Assumes file pattern like X_{set_type}_hog_batch_*.npy and y_{set_type}_hog_batch_*.npy.
-    Args:
-        hog_batch_dir (str): Directory containing the batch .npy files.
-        set_type (str): 'train' or 'test'.
-    Returns:
-        (np.array, np.array): (X_hog_features, y_labels_numeric) or (None, None)
-    """
-    feature_pattern = os.path.join(hog_batch_dir, f'X_{set_type}_hog_batch_*.npy')
-    label_pattern = os.path.join(hog_batch_dir, f'y_{set_type}_hog_batch_*.npy')
-
-    feature_files = sorted(glob.glob(feature_pattern))
-    label_files = sorted(glob.glob(label_pattern))
-
-    if not feature_files:
-        print(f"WARNING: No HOG feature batch files found for {set_type} matching pattern: {feature_pattern}")
-        return None, None
-    if not label_files:
-        print(f"WARNING: No HOG label batch files found for {set_type} matching pattern: {label_pattern}")
-        # Can potentially try to find a single label file if batches only store features?
-        # But assuming labels are saved alongside features in batches based on prompt.
-        return None, None
-    if len(feature_files) != len(label_files):
-        print(f"ERROR: Mismatch in number of HOG feature batch files ({len(feature_files)}) and label batch files ({len(label_files)}) for {set_type}.")
-        return None, None
-
-    print(f"Found {len(feature_files)} HOG batch files for {set_type}. Loading...")
-
-    X_batches, y_batches = [], []
-    try:
-        for i, feat_file in enumerate(feature_files):
-            label_file = label_files[i] # Assuming sorted lists match
-            print(f"  Loading batch {i+1}/{len(feature_files)} from {os.path.basename(feat_file)} and {os.path.basename(label_file)}...")
-            X_batch = np.load(feat_file)
-            y_batch = np.load(label_file)
-
-            if X_batch.shape[0] != y_batch.shape[0]:
-                 print(f"ERROR: Mismatch in sample count within batch file {os.path.basename(feat_file)} ({X_batch.shape[0]}) and {os.path.basename(label_file)} ({y_batch.shape[0]}). Skipping batch.")
-                 # Decide whether to skip the batch or the whole process
-                 # For simplicity, let's treat this as a fatal error for the HOG loading
-                 return None, None
-
-            X_batches.append(X_batch)
-            y_batches.append(y_batch)
-            
-            # Optional: Clean up batch data after loading
-            del X_batch, y_batch
-            gc.collect()
-
-
-        X_hog_all = np.concatenate(X_batches, axis=0)
-        y_hog_labels_all = np.concatenate(y_batches, axis=0)
-
-        print(f"Successfully loaded and concatenated HOG features for {set_type}. Shape: {X_hog_all.shape}, Labels shape: {y_hog_labels_all.shape}")
-
-        del X_batches, y_batches
-        gc.collect()
-
-        return X_hog_all, y_hog_labels_all
-
-    except Exception as e:
-        print(f"ERROR loading HOG data from batches: {e}")
-        traceback.print_exc() # Print full traceback for debugging
-        return None, None
 
 # --- DMatrix Creation (Simplified, as data is already train/test split) ---
 # This function remains the same, it works on the concatenated NumPy arrays provided to it.
@@ -518,7 +441,7 @@ def train_and_evaluate_xgb_dmatrix(dtrain_path, dtest_path, y_test_actual,
 
 # --- Main Execution Pipeline ---
 def run_balanced_spm_classification_pipeline():
-    print("\n--- Starting BALANCED SPM+HOG Classification Pipeline ---")
+    print("\n--- Starting BALANCED SPM (SIFT/ORB) Classification Pipeline ---")
 
     # --- 1. Load Label Encoder ---
     label_encoder_files = glob.glob(LABEL_ENCODER_FILE_PATTERN)
@@ -542,16 +465,12 @@ def run_balanced_spm_classification_pipeline():
     # L_val should be MAX_LEVEL_INDEX_FOR_LOADING
     sift_spm_name = f"SPM_SIFT_L{MAX_LEVEL_INDEX_FOR_LOADING}"
     orb_spm_name = f"SPM_ORB_L{MAX_LEVEL_INDEX_FOR_LOADING}"
-    hog_name = "Global_HOG_Batches" # Updated name to reflect source
-    
+    spm_sift_orb_name = f"SPM_SIFT_ORB_L{MAX_LEVEL_INDEX_FOR_LOADING}"
+
     feature_sets_to_run = {
-        # Uncomment to run individual feature sets if needed
-        #sift_spm_name: {"sift_spm": True, "orb_spm": False, "hog": False},
-        #orb_spm_name: {"sift_spm": False, "orb_spm": True, "hog": False},
-        hog_name: {"sift_spm": False, "orb_spm": False, "hog": True},
-        f"{sift_spm_name}_{hog_name}": {"sift_spm": True, "orb_spm": False, "hog": True},
-        f"{orb_spm_name}_{hog_name}": {"sift_spm": False, "orb_spm": True, "hog": True},
-        f"{sift_spm_name}_{orb_spm_name}_{hog_name}": {"sift_spm": True, "orb_spm": True, "hog": True},
+        sift_spm_name: {"sift_spm": True, "orb_spm": False},
+        orb_spm_name: {"sift_spm": False, "orb_spm": True},
+        spm_sift_orb_name: {"sift_spm": True, "orb_spm": True},
     }
 
     all_best_params_from_gs = {} # Store best params for each feature set
@@ -571,25 +490,18 @@ def run_balanced_spm_classification_pipeline():
             X_sift_tr, y_sift_tr = load_balanced_spm_histograms_and_labels(SPM_HISTOGRAMS_DIR, "sift", "train", MAX_LEVEL_INDEX_FOR_LOADING, VOCAB_SIZE_FOR_LOADING)
             if X_sift_tr is not None: X_train_list.append(X_sift_tr)
             if y_train_final is None and y_sift_tr is not None: y_train_final = y_sift_tr
-            elif y_sift_tr is not None and not np.array_equal(y_train_final, y_sift_tr): print("WARNING: SIFT train label mismatch! This feature set will be skipped."); load_success_train = False
+            # If y_train_final is already set (e.g., by ORB), check consistency
+            elif y_sift_tr is not None and y_train_final is not None and not np.array_equal(y_train_final, y_sift_tr): print("WARNING: SIFT train label mismatch! This feature set will be skipped."); load_success_train = False
             if X_sift_tr is None: load_success_train = False # Mark failure if feature loading failed
 
         if load_success_train and include_features_dict.get("orb_spm"):
             X_orb_tr, y_orb_tr = load_balanced_spm_histograms_and_labels(SPM_HISTOGRAMS_DIR, "orb", "train", MAX_LEVEL_INDEX_FOR_LOADING, VOCAB_SIZE_FOR_LOADING)
             if X_orb_tr is not None: X_train_list.append(X_orb_tr)
             if y_train_final is None and y_orb_tr is not None: y_train_final = y_orb_tr
-            elif y_orb_tr is not None and not np.array_equal(y_train_final, y_orb_tr): print("WARNING: ORB train label mismatch! This feature set will be skipped."); load_success_train = False
-            if X_orb_tr is None: load_success_train = False
-
-        if load_success_train and include_features_dict.get("hog"):
-            # Use the new function to load HOG from batches
-            X_hog_tr, y_hog_tr = load_balanced_hog_from_batches(HOG_BATCH_DIR, "train")
-            if X_hog_tr is not None: X_train_list.append(X_hog_tr)
-            if y_train_final is None and y_hog_tr is not None: y_train_final = y_hog_tr
-            # Check labels consistency only if y_train_final was already set by a previous feature
-            elif y_hog_tr is not None and y_train_final is not None and not np.array_equal(y_train_final, y_hog_tr): 
-                 print("WARNING: HOG train label mismatch! This feature set will be skipped."); load_success_train = False
-            if X_hog_tr is None: load_success_train = False # Mark failure if HOG loading failed
+             # Check labels consistency only if y_train_final was already set by a previous feature
+            elif y_orb_tr is not None and y_train_final is not None and not np.array_equal(y_train_final, y_orb_tr): 
+                 print("WARNING: ORB train label mismatch! This feature set will be skipped."); load_success_train = False
+            if X_orb_tr is None: load_success_train = False # Mark failure if ORB loading failed
 
 
         if not load_success_train or not X_train_list or y_train_final is None:
@@ -615,32 +527,25 @@ def run_balanced_spm_classification_pipeline():
             X_sift_te, y_sift_te = load_balanced_spm_histograms_and_labels(SPM_HISTOGRAMS_DIR, "sift", "test", MAX_LEVEL_INDEX_FOR_LOADING, VOCAB_SIZE_FOR_LOADING)
             if X_sift_te is not None: X_test_list.append(X_sift_te)
             if y_test_final is None and y_sift_te is not None: y_test_final = y_sift_te
-            elif y_sift_te is not None and not np.array_equal(y_test_final, y_sift_te): print("WARNING: SIFT test label mismatch! This feature set will be skipped."); load_success_test = False
+             # If y_test_final is already set (e.g., by ORB), check consistency
+            elif y_sift_te is not None and y_test_final is not None and not np.array_equal(y_test_final, y_sift_te): print("WARNING: SIFT test label mismatch! This feature set will be skipped."); load_success_test = False
             if X_sift_te is None: load_success_test = False
+
 
         if load_success_test and include_features_dict.get("orb_spm"):
             X_orb_te, y_orb_te = load_balanced_spm_histograms_and_labels(SPM_HISTOGRAMS_DIR, "orb", "test", MAX_LEVEL_INDEX_FOR_LOADING, VOCAB_SIZE_FOR_LOADING)
             if X_orb_te is not None: X_test_list.append(X_orb_te)
             if y_test_final is None and y_orb_te is not None: y_test_final = y_orb_te
-            elif y_orb_te is not None and not np.array_equal(y_test_final, y_orb_te): print("WARNING: ORB test label mismatch! This feature set will be skipped."); load_success_test = False
+            # Check labels consistency only if y_test_final was already set by a previous feature
+            elif y_orb_te is not None and y_test_final is not None and not np.array_equal(y_test_final, y_orb_te): 
+                 print("WARNING: ORB test label mismatch! This feature set will be skipped."); load_success_test = False
             if X_orb_te is None: load_success_test = False
-
-
-        if load_success_test and include_features_dict.get("hog"):
-            # Use the new function to load HOG from batches
-            X_hog_te, y_hog_te = load_balanced_hog_from_batches(HOG_BATCH_DIR, "test")
-            if X_hog_te is not None: X_test_list.append(X_hog_te)
-            if y_test_final is None and y_hog_te is not None: y_test_final = y_hog_te
-             # Check labels consistency only if y_test_final was already set by a previous feature
-            elif y_hog_te is not None and y_test_final is not None and not np.array_equal(y_test_final, y_hog_te):
-                 print("WARNING: HOG test label mismatch! This feature set will be skipped."); load_success_test = False
-            if X_hog_te is None: load_success_test = False
 
 
         if not load_success_test or not X_test_list or y_test_final is None:
             print(f"Failed to load sufficient test data or labels for {feature_desc_key}. Skipping.");
             # Clean up any partially loaded data
-            del X_test_list, X_train_combined, y_train_final, y_test_final # Also clean train data if test failed
+            del X_test_list, X_train_combined, y_train_final # Also clean train data if test failed
             gc.collect()
             continue
 
@@ -726,13 +631,15 @@ def run_balanced_spm_classification_pipeline():
         del X_test_combined, train_scaler # train_scaler might still hold memory
         gc.collect()
 
+
         if not dtrain_path or not dtest_path: 
             print(f"DMatrix creation failed for {feature_desc_key}. Skipping final train."); 
-            # y_test_final is still needed for evaluation below if DMatrix creation succeeded
+             # y_test_final is still needed for evaluation below if DMatrix creation succeeded
             # If DMatrix creation failed, y_test_final should ideally be cleaned here.
             del y_test_final
             gc.collect()
             continue
+
 
         # --- Train Final Model on Full DMatrix ---
         print(f"Starting final training for {feature_desc_key}...")
@@ -746,13 +653,13 @@ def run_balanced_spm_classification_pipeline():
         del y_test_final
         gc.collect()
 
+
         if train_success:
             print(f"Successfully processed {feature_desc_key}")
         else:
             print(f"Final training/evaluation failed for {feature_desc_key}")
 
-    print("\n--- BALANCED SPM+HOG Classification Pipeline Complete ---")
+    print("\n--- BALANCED SPM (SIFT/ORB) Classification Pipeline Complete ---")
     print("Best parameters found from GridSearchCV (on sample/full train):")
     for name, params in all_best_params_from_gs.items(): print(f"  {name}: {params}")
     print(f"Results saved to: {RESULTS_DIR_XGB_SPM_BALANCED}")
-
