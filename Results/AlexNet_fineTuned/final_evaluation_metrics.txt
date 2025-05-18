@@ -1,0 +1,20 @@
+Overall Accuracy: 0.8503
+
+Classification Report:
+                          precision    recall  f1-score   support
+
+Indoor Public/Commercial     0.8338    0.7654    0.7981      5000
+      Indoor Residential     0.8171    0.8882    0.8512      5000
+         Outdoor Natural     0.9069    0.9120    0.9095      5000
+           Outdoor Urban     0.8446    0.8356    0.8401      5000
+
+                accuracy                         0.8503     20000
+               macro avg     0.8506    0.8503    0.8497     20000
+            weighted avg     0.8506    0.8503    0.8497     20000
+
+
+Confusion Matrix:
+[[3827  854   34  285]
+ [ 442 4441   19   98]
+ [  31   23 4560  386]
+ [ 290  117  415 4178]]

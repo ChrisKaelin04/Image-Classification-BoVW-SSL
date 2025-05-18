@@ -15,7 +15,7 @@ import pickle # To load the label encoder for class names
 
 # --- Configuration ---
 # Path to your saved fine-tuned model
-SAVED_MODEL_PATH = r"E:\CV_Models_PyTorch_Balanced\finetuned_alexnet_places365_4cat_best_balanced.pth" # From fine-tuning
+SAVED_MODEL_PATH = r"E:\CV_Features_CNN_PyTorch_Balanced\alexnet_places365.pth\alexnet_places365.pth" # From the factory
 # Path to your NPZ file containing ALL splits (train/val/test_final)
 NPZ_ALL_SPLITS_FILE = r"E:\CV_features\all_splits_data_4cat\all_splits_data_4cat.npz"
 # Path to the saved label encoder (created by create_all_splits_for_finetuning.py)

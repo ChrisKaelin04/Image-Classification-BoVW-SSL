@@ -1,6 +1,6 @@
 import sys
 from fine_tune import main_finetuning_pipeline
-from Label_Split import create_all_splits_for_finetuning
+from Label_Split import run as create_all_splits_for_finetuning
 from download_places import download_dataset
 from eval_model import evaluate
 
@@ -15,10 +15,10 @@ def main():
     """
     print("Starting the Image Classification Pipeline...")
     # Step 1: Download and prepare the dataset
-    download_dataset()
-    create_all_splits_for_finetuning()
+    #download_dataset()
+    #create_all_splits_for_finetuning()
     # Step 2: Extract features using CNN
-    main_finetuning_pipeline()
+    #main_finetuning_pipeline()
     
     # Step 3: Evaluate the model
     evaluate()
