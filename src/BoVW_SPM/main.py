@@ -17,19 +17,19 @@ def main():
     print("Starting the Image Classification Pipeline...")
 
     # Step 1: Get the data, process it
-    #download_dataset()
-    #create_balanced_split_for_bovw()
+    download_dataset()
+    create_balanced_split_for_bovw()
     # Step 2: Extract features
-    #SOH_extract_SPM()
+    SOH_extract_SPM()
     
     # Step 3: Build Vocabulary with KMeans
-    #build_all_spm_vocabularies_balanced()
+    build_all_spm_vocabularies_balanced()
     
     # Step 4: Build Histograms for each image
-    #main_histogram_creation_spm_balanced()
+    main_histogram_creation_spm_balanced()
     
     # Step 5: Train and evaluate the model. If its better than 0.25 accuracy great success
-    run_spm_classification_pipeline()
+    #run_spm_classification_pipeline()
 
     print("Pipeline completed successfully!")
 
