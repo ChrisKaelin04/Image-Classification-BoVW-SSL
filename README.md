@@ -12,6 +12,8 @@ This project provides a comparative analysis of various image classification tec
 
 We investigate the performance, training efficiency, and operational limitations of these methods on a strategically curated subset of the **Places365 dataset**. The goal is to offer practical insights for practitioners and researchers working with limited computational resources.
 
+Observe the PDF for the full report!
+
 ## 🎯 Key Objectives
 
 *   Compare traditional methods (BoVW with SIFT/ORB, SPM, Spectral Features) against deep learning models (AlexNet, Vision Transformer).
