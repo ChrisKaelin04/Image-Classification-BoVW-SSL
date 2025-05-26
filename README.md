@@ -141,9 +141,7 @@ This repository primarily serves as a report and summary of the comparative stud
 While this project documents a specific study, suggestions for future comparisons, alternative resource-constrained strategies, or improvements to the analysis are welcome via Issues or Pull Requests.
 
 ## 📄 License
-
-*(Specify your license here, e.g., MIT, Apache 2.0. If unsure, MIT is a common choice for open projects.)*
-Example: This project is licensed under the MIT License - see the `LICENSE.md` file for details.
+This project is licensed under the MIT License - see the `LICENSE.md` file for details.
 
 ## 🙏 Acknowledgements
 
