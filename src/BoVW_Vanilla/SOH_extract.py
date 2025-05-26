@@ -12,10 +12,10 @@ import gc
 # Input: NPZ file from your balanced BoVW data preparation script (create_balanced_split_for_bovw.py)
 # ADJUST THE FILENAME to match the output of your create_balanced_split_for_bovw.py
 # Example: bovw_train_test_paths_N8000_S42.npz (N=total images, S=seed)
-BALANCED_SPLIT_NPZ_FILE = r"E:\CV_features\bovw_splits_balanced\bovw_train_test_paths_N100000_S42.npz"
+BALANCED_SPLIT_NPZ_FILE = r"E:\CV\bovw_splits_balanced\bovw_train_test_paths_N100000_S42.npz"
 
 # Output directory for these "vanilla" BoVW features (descriptors and HOG)
-OUTPUT_VANILLA_FEATURES_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features" # New specific dir
+OUTPUT_VANILLA_FEATURES_DIR = r"E:\CV\features_BoVW_Vanilla_balanced" # New specific dir
 
 BATCH_SAVE_SIZE = 1000  # Number of images to process before saving a SIFT/ORB descriptor batch
 

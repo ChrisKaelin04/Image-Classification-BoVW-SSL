@@ -1,9 +1,9 @@
 import tensorflow_datasets as tfds
 import os
 import time
-TFDS_DATA_DIR = "E:\CV_imgs"
+
 #Setup for downloading and preparing the Places365 dataset using TensorFlow Datasets (TFDS). This was not written by me, used online references.
-def setup_download():
+def setup_download(TFDS_DATA_DIR):
     print(f"--- Starting Places365 Download and Preparation ---")
     print(f"Target directory for TFDS data: {TFDS_DATA_DIR}")
     print("WARNING: This process will download ~60GB+ and requires significant additional space for preparation.")
@@ -18,7 +18,7 @@ def setup_download():
         print("Please ensure you have permissions and the path is valid before proceeding.")
         exit() # Exit if directory creation fails
 
-def begin_download():
+def begin_download(TFDS_DATA_DIR):
     # Record start time
     start_time = time.time()
 
@@ -67,6 +67,6 @@ def begin_download():
     print("Tomorrow, in your main code, use tfds.load('places365_small', data_dir='{}', ...) ".format(TFDS_DATA_DIR))
     print("and it will load the prepared data instantly from disk.")
 
-def download_dataset():
-    setup_download()
-    begin_download()
+def download_dataset(TFDS_DATA_DIR):
+    setup_download(TFDS_DATA_DIR)
+    begin_download(TFDS_DATA_DIR)

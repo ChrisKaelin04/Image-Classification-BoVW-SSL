@@ -20,12 +20,12 @@ import gc
 # --- Configuration for Classification using BALANCED SPM Histograms (SIFT and ORB) ---
 
 # Directory where histogram_creation_SPM_balanced.py saved the final .npy feature/label files
-SPM_HISTOGRAMS_DIR = r"E:\CV_features_SPM_balanced\spm_histograms_L1_k1000" # Adjust L and K if different
+SPM_HISTOGRAMS_DIR = r"E:\CV\features_SPM_balanced\spm_histograms_L1_k1000" # Adjust L and K if different
 # Example path: E:\CV_features_SPM_balanced\spm_histograms_L1_k1000 (assuming PYRAMID_LEVELS=2, VOCAB_SIZE=1000)
 
 # Directory containing the label encoder file from the BALANCED splitting script
 # This is used to get class names.
-BALANCED_SPLITS_INFO_DIR = r"E:\CV_features\bovw_splits_balanced" # Where NPZ and PKL from balanced split are
+BALANCED_SPLITS_INFO_DIR = r"E:\CV\bovw_splits_balanced" # Where NPZ and PKL from balanced split are
 
 # You need to know which N (total images) and S (seed) was used for the balanced split
 # to pick the correct label encoder. For simplicity, let's assume a fixed name or find one.
@@ -34,11 +34,11 @@ BALANCED_SPLITS_INFO_DIR = r"E:\CV_features\bovw_splits_balanced" # Where NPZ an
 LABEL_ENCODER_FILE_PATTERN = os.path.join(BALANCED_SPLITS_INFO_DIR, "bovw_label_encoder_N*_S*.pkl")
 
 # Results directory for SPM-only results
-RESULTS_DIR_XGB_SPM_BALANCED = r"E:\CV_features_SPM_balanced\classification_results_XGB_SPM_SIFT_ORB_balanced"
+RESULTS_DIR_XGB_SPM_BALANCED = r"E:\CV\features_SPM_balanced\classification_results_XGB_SPM_SIFT_ORB_balanced"
 os.makedirs(RESULTS_DIR_XGB_SPM_BALANCED, exist_ok=True)
 
 # DMatrix cache (can be shared or specific) for SPM features
-DMATRIX_CACHE_DIR_BALANCED = os.path.join(r"E:\CV_features_SPM_balanced", "xgb_dmatrix_cache_spm_balanced")
+DMATRIX_CACHE_DIR_BALANCED = os.path.join(r"E:\CV\features_SPM_balanced", "xgb_dmatrix_cache_spm_balanced")
 os.makedirs(DMATRIX_CACHE_DIR_BALANCED, exist_ok=True)
 
 # These must match what was used in histogram_creation_SPM_balanced.py to find the .npy files

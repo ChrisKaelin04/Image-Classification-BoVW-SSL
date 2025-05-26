@@ -9,7 +9,7 @@ import joblib
 import gc
 
 # --- Configuration (can be arguments to the main function) ---
-DEFAULT_VANILLA_FEATURES_RAW_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features"
+DEFAULT_VANILLA_FEATURES_RAW_DIR = r"E:\CV\features_BoVW_Vanilla_balanced"
 DEFAULT_VOCABULARY_SIZE = 1000
 DEFAULT_MINIBATCH_KMEANS_INTERNAL_BATCH_SIZE = 1024 * 4
 DEFAULT_RANDOM_SEED = 42

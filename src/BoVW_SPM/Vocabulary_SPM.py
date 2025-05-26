@@ -8,9 +8,6 @@ from sklearn.cluster import MiniBatchKMeans
 import joblib
 import gc
 
-# --- Configuration for SPM Vocabulary (from BALANCED features) ---
-# This should be the output directory of SOH_extract_SPM_balanced.py
-FEATURES_SPM_BALANCED_DIR = r"E:\CV_features_SPM_balanced"
 
 # --- K-Means Parameters ---
 VOCABULARY_SIZE = 1000  # (k) Number of visual words
@@ -18,7 +15,7 @@ MINIBATCH_KMEANS_BATCH_SIZE = 1024 * 4 # Internal batch size for MiniBatchKMeans
 RANDOM_SEED = 42
 KMEANS_N_INIT = 10 # Number of initializations for MiniBatchKMeans
 
-def build_single_vocab_for_feature_type_balanced(feature_type_to_process):
+def build_single_vocab_for_feature_type_balanced(FEATURES_SPM_BALANCED_DIR, feature_type_to_process):
     """
     Builds the K-Means vocabulary for a single specified feature type (e.g., 'sift' or 'orb')
     using BALANCED SPM-structured batch files FROM THE TRAINING SET ONLY.
@@ -151,7 +148,7 @@ def build_single_vocab_for_feature_type_balanced(feature_type_to_process):
         print("Vocabulary creation failed.")
         return False
 
-def build_all_spm_vocabularies_balanced():
+def build_all_spm_vocabularies_balanced(FEATURES_SPM_BALANCED_DIR):
     """
     Main function to build SPM vocabularies for all specified feature types using balanced training data.
     """
@@ -159,7 +156,7 @@ def build_all_spm_vocabularies_balanced():
     feature_types_to_build = ['sift', 'orb'] # List of feature types you want to process
 
     for ft_type in feature_types_to_build:
-        success = build_single_vocab_for_feature_type_balanced(ft_type)
+        success = build_single_vocab_for_feature_type_balanced(FEATURES_SPM_BALANCED_DIR, ft_type)
         if not success:
             print(f"IMPORTANT: Vocabulary building failed for {ft_type.upper()} (Balanced SPM). Please check errors.")
         print("-" * 50)

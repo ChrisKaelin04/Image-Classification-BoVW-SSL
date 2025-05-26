@@ -12,18 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 from PIL import Image # For saving images
-import shutil # For directory management if needed
 
-# --- Configuration ---
-TFDS_DATA_DIR = r"E:\CV_imgs" # Where TFDS downloaded Places365
-
-# NEW: Directory to store the selected raw images for BoVW processing
-# These images will be copied from the TFDS cache or saved directly.
-# This directory will have subfolders for each broad category, initially.
-BOVW_RAW_IMAGE_DATA_DIR = r"E:\CV_BoVW_Balanced_Raw_Images"
-
-# NEW: Directory where the NPZ file (with image paths and labels) and PKL (label encoder) will be saved
-OUTPUT_SPLITS_INFO_DIR_BOVW = r"E:\CV_features\bovw_splits_balanced"
 
 RANDOM_SEED = 42
 TARGET_IMAGES_PER_BROAD_CATEGORY = 25000
@@ -203,6 +192,7 @@ broad_category_definitions = {
                            'beach',
                            'butte',
                            'canyon',
+                           'corn_field',
                            'canal/natural',
                            'campsite',
                            'cliff',
@@ -218,6 +208,7 @@ broad_category_definitions = {
                            'glacier',
                            'grotto',
                            'hot_spring',
+                           'hayfield',
                            'ice_floe',
                            'ice_shelf',
                            'iceberg',
@@ -238,6 +229,7 @@ broad_category_definitions = {
                            'snowfield',
                            'swamp',
                            'swimming_hole',
+                           'wheat_field',
                            'tree_farm',
                            'tundra',
                            'underwater/ocean_deep',
@@ -281,7 +273,6 @@ broad_category_definitions = {
                          'chalet',
                          'church/outdoor',
                          'construction_site',
-                         'corn_field',
                          'corral',
                          'cottage',
                          'courtyard',
@@ -310,7 +301,6 @@ broad_category_definitions = {
                          'greenhouse/outdoor',
                          'hangar/outdoor',
                          'harbor',
-                         'hayfield',
                          'heliport',
                          'highway',
                          'hospital',
@@ -399,13 +389,12 @@ broad_category_definitions = {
                          'volleyball_court/outdoor',
                          'water_park',
                          'water_tower',
-                         'wheat_field',
                          'wind_farm',
                          'windmill',
                          'yard',
                          'zen_garden']}
 
-def create_balanced_split_for_bovw():
+def create_balanced_split_for_bovw(TFDS_DATA_DIR, BOVW_RAW_IMAGE_DATA_DIR, OUTPUT_SPLITS_INFO_DIR_BOVW):
     print(f"--- Starting Balanced Data Preparation for BoVW ({len(broad_categories_list)} Broad Categories) ---")
     print(f"Targeting {TARGET_IMAGES_PER_BROAD_CATEGORY} images per broad category.")
     print(f"Raw images for BoVW will be saved to: {BOVW_RAW_IMAGE_DATA_DIR}")

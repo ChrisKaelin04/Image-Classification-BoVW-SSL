@@ -17,17 +17,20 @@ def main():
     print("Starting the Image Classification Pipeline...")
 
     # Step 1: Get the data
-    #download_dataset()
-    #create_balanced_split_for_bovw()
+    TFDS_DATA_DIR = "E:\CV\Images_Downloaded"
+    RAW_IMAGE_DATA_DIR = "E:\CV\Raw_Images"
+    OUTPUT_SPLITS_INFO_DIR = "E:\CV\Splits_Info"
+    download_dataset(TFDS_DATA_DIR)
+    create_balanced_split_for_bovw(TFDS_DATA_DIR, RAW_IMAGE_DATA_DIR, OUTPUT_SPLITS_INFO_DIR)
 
     # Step 2: Extract features
-    #SOH_extract()
+    SOH_extract()
     
     # Step 3: Build Vocabulary with KMeans
-    #build_all_vanilla_bovw_vocabularies()
+    build_all_vanilla_bovw_vocabularies()
     
     # Step 5: Build Histograms for each image
-    #main_histogram_creation_vanilla_balanced()
+    main_histogram_creation_vanilla_balanced()
     
     # Step 6: Train and evaluate the model. If its better than 0.25 accuracy great success
     test()

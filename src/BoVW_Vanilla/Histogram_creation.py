@@ -13,7 +13,7 @@ import gc
 
 # Input: Directory where SOH_extract_vanilla_balanced.py saved SIFT/ORB descriptor batches
 # This is the parent directory of 'sift_descriptors_batches' and 'orb_descriptors_batches'
-VANILLA_FEATURES_RAW_DIR = r"E:\CV_BoVW_Vanilla_Balanced\raw_features"
+VANILLA_FEATURES_RAW_DIR = r"E:\CV\features_BoVW_Vanilla_balanced"
 
 # Directory where build_vocabulary_vanilla_balanced.py saved KMeans models
 # (Often the same as VANILLA_FEATURES_RAW_DIR)

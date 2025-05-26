@@ -9,20 +9,11 @@ from sklearn.preprocessing import normalize
 from joblib import Parallel, delayed
 import gc
 
-# --- Configuration for SPM Histograms from BALANCED Features ---
-# Directory where SOH_extract_SPM_from_balanced_split.py saved its output
-FEATURES_SPM_BALANCED_DIR = r"E:\CV_features_SPM_balanced"
 
-# Directory where build_vocabulary_spm_balanced.py saved KMeans models/vocabularies
-# (This is often the same as FEATURES_SPM_BALANCED_DIR)
-VOCAB_DIR_SPM_BALANCED = FEATURES_SPM_BALANCED_DIR
 
 VOCAB_SIZE = 1000  # Must match K used for vocabulary building
 PYRAMID_LEVELS = 2 # L=2 gives levels 0 and 1 (1x1, 2x2 grids) -> 1+4=5 regions.
 
-# Output directory for the final SPM histograms
-SPM_HISTOGRAMS_OUTPUT_DIR = os.path.join(FEATURES_SPM_BALANCED_DIR, f"spm_histograms_L{PYRAMID_LEVELS-1}_k{VOCAB_SIZE}")
-os.makedirs(SPM_HISTOGRAMS_OUTPUT_DIR, exist_ok=True)
 
 
 def generate_spm_histogram_for_image_data(image_data_dict, kmeans_model, vocab_size, num_pyramid_levels):
@@ -113,7 +104,7 @@ def _process_image_for_spm_hist_parallel(image_path_key, image_data_dict_value, 
     # Return the image_path (key) and its numeric label (from image_data_dict) along with the histogram
     return image_path_key, image_data_dict_value.get('label'), hist
 
-def generate_histograms_for_set(feature_type, data_set_name, kmeans_model, vocab_size, num_pyramid_levels, n_jobs=-1):
+def generate_histograms_for_set(FEATURES_SPM_BALANCED_DIR, feature_type, data_set_name, kmeans_model, vocab_size, num_pyramid_levels, n_jobs=-1):
     """
     Generates SPM histograms for all images in a given set (train or test) for a feature type.
     """
@@ -192,12 +183,15 @@ def generate_histograms_for_set(feature_type, data_set_name, kmeans_model, vocab
     return histograms, labels_numeric, image_paths_processed
 
 
-def main_histogram_creation_spm_balanced():
+def main_histogram_creation_spm_balanced(FEATURES_SPM_BALANCED_DIR):
     print("--- Starting SPM Histogram Generation (from Balanced Data) ---")
+    # Output directory for the final SPM histograms
+    SPM_HISTOGRAMS_OUTPUT_DIR = os.path.join(FEATURES_SPM_BALANCED_DIR, f"spm_histograms_L{PYRAMID_LEVELS-1}_k{VOCAB_SIZE}")
+    os.makedirs(SPM_HISTOGRAMS_OUTPUT_DIR, exist_ok=True)
 
     feature_types = ['sift', 'orb']
     data_sets = ['train', 'test']
-
+    VOCAB_DIR_SPM_BALANCED = FEATURES_SPM_BALANCED_DIR
     for ft_type in feature_types:
         kmeans_model_file = os.path.join(VOCAB_DIR_SPM_BALANCED, f'{ft_type}_kmeans_model_spm_balanced_k{VOCAB_SIZE}_train.joblib')
         if not os.path.exists(kmeans_model_file):
@@ -214,7 +208,7 @@ def main_histogram_creation_spm_balanced():
 
         for set_name in data_sets:
             X_spm_hist, y_labels_numeric, processed_paths = generate_histograms_for_set(
-                ft_type, set_name, kmeans_model, VOCAB_SIZE, PYRAMID_LEVELS,
+                FEATURES_SPM_BALANCED_DIR, ft_type, set_name, kmeans_model, VOCAB_SIZE, PYRAMID_LEVELS,
                 n_jobs=os.cpu_count() - 2 if os.cpu_count() > 2 else 1 # Adjust n_jobs
             )
 

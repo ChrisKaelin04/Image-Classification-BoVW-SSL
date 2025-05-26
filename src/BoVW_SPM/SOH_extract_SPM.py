@@ -5,20 +5,6 @@ from tqdm import tqdm # Ensure tqdm is imported
 import pickle
 import h5py
 
-# --- Configuration (keep as is) ---
-BALANCED_SPLIT_NPZ_FILE = r"E:\CV_features\bovw_splits_balanced\bovw_train_test_paths_N100000_S42.npz"
-OUTPUT_FEATURES_SPM_DIR = r"E:\CV_features_SPM_balanced"
-BATCH_SAVE_SIZE = 5000
-SIFT_BATCHES_SPM_DIR = os.path.join(OUTPUT_FEATURES_SPM_DIR, 'sift_batches_spm')
-ORB_BATCHES_SPM_DIR = os.path.join(OUTPUT_FEATURES_SPM_DIR, 'orb_batches_spm')
-HOG_BATCHES_SPM_DIR = os.path.join(OUTPUT_FEATURES_SPM_DIR, 'hog_batches_spm')
-
-def ensure_directories():
-    os.makedirs(OUTPUT_FEATURES_SPM_DIR, exist_ok=True)
-    os.makedirs(SIFT_BATCHES_SPM_DIR, exist_ok=True)
-    os.makedirs(ORB_BATCHES_SPM_DIR, exist_ok=True)
-    os.makedirs(HOG_BATCHES_SPM_DIR, exist_ok=True)
-
 def extract_features_from_image_path_spm(image_path, sift_detector, orb_detector, hog_detector, hog_win_size):
     '''Extracts SIFT (desc+coords), ORB (desc+coords), HOG features, and image dimensions from an image file.'''
     try:
@@ -118,7 +104,7 @@ def save_hog_batch_to_hdf5(hog_features_list, hog_paths_list, hog_labels_list, s
         print(f"No HOG features with positive size collected to save for {set_name} batch {batch_num_str}.")
 
 
-def SOH_extract_SPM_from_balanced_split(image_paths_to_process, corresponding_labels, set_name="train"):
+def SOH_extract_SPM_from_balanced_split(image_paths_to_process, corresponding_labels, BATCH_SAVE_SIZE, ORB_BATCHES_SPM_DIR=None, SIFT_BATCHES_SPM_DIR=None, HOG_BATCHES_SPM_DIR=None, set_name="train"):
     print(f"\n--- Starting SIFT/ORB/HOG Feature Extraction for SPM ({set_name} set) ---")
     print(f"Processing {len(image_paths_to_process)} images.")
     # ... (print output directories)
@@ -229,9 +215,8 @@ def SOH_extract_SPM_from_balanced_split(image_paths_to_process, corresponding_la
     print(f"\n--- Feature extraction for {set_name} set complete. Processed {processed_in_set_count} successful images. ---")
     # ... (print final messages)
 
-def main_spm_feature_extraction():
+def main_spm_feature_extraction(BALANCED_SPLIT_NPZ_FILE, BATCH_SAVE_SIZE, SIFT_BATCHES_SPM_DIR, ORB_BATCHES_SPM_DIR, HOG_BATCHES_SPM_DIR):
     print("--- Main SPM Feature Extraction from Balanced Split ---")
-    ensure_directories()
 
     if not os.path.exists(BALANCED_SPLIT_NPZ_FILE):
         print(f"ERROR: Balanced split NPZ file not found at {BALANCED_SPLIT_NPZ_FILE}")
@@ -248,8 +233,7 @@ def main_spm_feature_extraction():
     except Exception as e:
         print(f"Error loading NPZ file: {e}")
         return
-
-    SOH_extract_SPM_from_balanced_split(train_image_paths, train_labels_numeric, set_name="train")
-    SOH_extract_SPM_from_balanced_split(test_image_paths, test_labels_numeric, set_name="test")
+    SOH_extract_SPM_from_balanced_split(train_image_paths, train_labels_numeric, BATCH_SAVE_SIZE, ORB_BATCHES_SPM_DIR, SIFT_BATCHES_SPM_DIR, HOG_BATCHES_SPM_DIR, set_name="train")
+    SOH_extract_SPM_from_balanced_split(test_image_paths, test_labels_numeric, BATCH_SAVE_SIZE, ORB_BATCHES_SPM_DIR, SIFT_BATCHES_SPM_DIR, HOG_BATCHES_SPM_DIR, set_name="test")
 
     print("\n--- All SPM Feature Extraction from Balanced Split Complete ---")
