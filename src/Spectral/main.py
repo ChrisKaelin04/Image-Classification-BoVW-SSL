@@ -20,8 +20,8 @@ import xgboost as xgb
 import collections # For Counter
 
 # --- Overall Configuration ---
-TFDS_DATA_DIR = "E:\CV_imgs"
-BASE_OUTPUT_DIR = "E:\CV_Pipeline_Spectral_Balanced" # Main output for this spectral pipeline, indicating balanced data
+TFDS_DATA_DIR = "E:\CV\Images_Downloaded"
+BASE_OUTPUT_DIR = "E:\CV\Pipeline_Spectral_Balanced" # Main output for this spectral pipeline, indicating balanced data
 RANDOM_SEED = 42
 
 # --- Balancing Parameters ---
