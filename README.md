@@ -1,4 +1,4 @@
-# Image Classification Under Resource Constraints: A Comparative Study 🖼️🔬
+# Image Classification Under Resource Constraints: A Comparative Study
 
 [![Python Version](https://img.shields.io/badge/Python-3.11.9-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?&style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
@@ -6,7 +6,7 @@
 [![OpenCV](https://img.shields.io/badge/OpenCV-grey?style=flat&logo=opencv&logoColor=white)](https://opencv.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-blue?style=flat&logo=xgboost&logoColor=white)](https://xgboost.ai/)
 
-## 🌟 Overview
+## Overview
 
 This project provides a comparative analysis of various image classification techniques, ranging from traditional feature-based methods to modern deep learning architectures. The core focus is on evaluating these approaches under **realistic hardware constraints**, mimicking a typical local workstation setup rather than high-end server infrastructure.
 
@@ -14,14 +14,14 @@ We investigate the performance, training efficiency, and operational limitations
 
 Observe the PDF for the full report!
 
-## 🎯 Key Objectives
+## Key Objectives
 
 *   Compare traditional methods (BoVW with SIFT/ORB, SPM, Spectral Features) against deep learning models (AlexNet, Vision Transformer).
 *   Evaluate performance on a 4-category scene classification task derived from Places365, designed to test semantic distinction.
 *   Analyze trade-offs in accuracy, resource consumption (RAM, VRAM), and training time within a constrained environment.
 *   Provide guidance for selecting appropriate image classification tools when hardware resources are limited.
 
-## 💾 Dataset: Places365 Subset
+## Dataset: Places365 Subset
 
 The original Places365 dataset contains 1.8 million images across 365 categories. To make experimentation feasible under hardware constraints, we:
 
@@ -37,7 +37,7 @@ The original Places365 dataset contains 1.8 million images across 365 categories
 
 This curated dataset allows for manageable training and evaluation while still posing a significant challenge for classification algorithms due to subtle contextual differences between categories.
 
-## 🛠️ Methodologies Explored
+## Methodologies Explored
 
 We implemented and evaluated the following approaches:
 
@@ -76,7 +76,7 @@ We implemented and evaluated the following approaches:
 *   For deep learning models, a custom HDF5 dataset was used with PyTorch for efficient loading from disk, managing RAM limitations.
 *   For AlexNet feature extraction, features were batched and saved to HDF5 files.
 
-## 📊 Key Findings & Results
+## Key Findings & Results
 
 Detailed performance metrics, including accuracy, F1-scores, and confusion matrices, can be found in the **`/Results`** folder of this repository.
 
@@ -104,7 +104,7 @@ Detailed performance metrics, including accuracy, F1-scores, and confusion matri
 
 For a detailed discussion, including specific category confusions and model behaviors, please refer to the full experimental results and discussion sections (if available as a paper/report) and the contents of the `/Results` folder.
 
-## 💻 Computational Environment
+## Computational Environment
 
 All experiments were conducted on a local workstation with the following specifications:
 
@@ -122,7 +122,7 @@ All experiments were conducted on a local workstation with the following specifi
 
 These specifications highlight the "constrained environment" aspect of this study.
 
-## 🚀 Getting Started (Conceptual)
+## Getting Started (Conceptual)
 
 This repository primarily serves as a report and summary of the comparative study. The code for implementing these models would involve:
 
@@ -138,14 +138,14 @@ This repository primarily serves as a report and summary of the comparative stud
 
 *(If you plan to add the actual code, you can replace this section with setup instructions, dependencies installation (`requirements.txt`), and how to run the experiments.)*
 
-## 🤝 Contributing
+## Contributing
 
 While this project documents a specific study, suggestions for future comparisons, alternative resource-constrained strategies, or improvements to the analysis are welcome via Issues or Pull Requests.
 
-## 📄 License
+## License
 This project is licensed under the MIT License - see the `LICENSE.md` file for details.
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 *   The **Places365 dataset** team for providing the foundational dataset.
 *   The developers of **PyTorch, TensorFlow, scikit-learn, OpenCV, XGBoost**, and other open-source libraries that made this research possible.
